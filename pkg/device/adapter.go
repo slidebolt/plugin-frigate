@@ -87,6 +87,13 @@ func MarkStaleCameras(b sdk.Bundle, active map[string]struct{}) {
 }
 
 func (a *cameraAdapter) publish(config logic.CameraConfig, stats *logic.FrigateStats, streams map[string]logic.RTCStreamInfo, online bool) {
+	// 1. Functional State (The "Clean" snapshot)
+	props := map[string]interface{}{
+		"online": online,
+		"name":   a.name,
+	}
+
+	// 2. Hardware Technical Data (The "Raw" bucket)
 	raw := map[string]interface{}{
 		"camera_name": a.name,
 		"detecting":   config.Detect.Enabled,
@@ -99,7 +106,8 @@ func (a *cameraAdapter) publish(config logic.CameraConfig, stats *logic.FrigateS
 			raw["streams"] = s
 			if len(s.Producers) > 0 {
 				raw["stream_source"] = s.Producers[0].RemoteAddr
-				raw["stream_url"] = s.Producers[0].URL
+				// Stream URL is functional, move to Props
+				props["stream_url"] = s.Producers[0].URL
 			}
 		}
 	}
@@ -111,15 +119,13 @@ func (a *cameraAdapter) publish(config logic.CameraConfig, stats *logic.FrigateS
 		}
 	}
 
+	// Persistence & Communication
 	_ = a.entity.UpdateRaw(raw)
 	_ = a.device.UpdateRaw(raw)
+	
 	if online {
-		_ = a.entity.UpdateState("active")
+		_ = a.entity.UpdateProperties(props)
 	} else {
 		_ = a.entity.Disable("offline")
 	}
-	_ = a.entity.Publish(fmt.Sprintf("entity.%s.state", a.entity.ID()), map[string]interface{}{
-		"online":  online,
-		"name":    a.name,
-	})
 }
