@@ -3,15 +3,18 @@ package bundle
 import (
 	"context"
 	"os"
-	 "github.com/slidebolt/plugin-frigate/pkg/device"
-	 "github.com/slidebolt/plugin-frigate/pkg/logic"
-	"github.com/slidebolt/plugin-sdk"
+	"sync"
 	"time"
+
+	"github.com/slidebolt/plugin-frigate/pkg/device"
+	"github.com/slidebolt/plugin-frigate/pkg/logic"
+	"github.com/slidebolt/plugin-sdk"
 )
 
 type FrigatePlugin struct {
 	bundle sdk.Bundle
 	cancel context.CancelFunc
+	wait   func()
 }
 
 func (p *FrigatePlugin) Init(b sdk.Bundle) error {
@@ -24,6 +27,13 @@ func (p *FrigatePlugin) Init(b sdk.Bundle) error {
 
 	p.start()
 	return nil
+}
+
+func (p *FrigatePlugin) Shutdown() {
+	if p.cancel != nil {
+		p.cancel()
+		p.wait()
+	}
 }
 
 func (p *FrigatePlugin) start() {
@@ -44,7 +54,6 @@ func (p *FrigatePlugin) start() {
 		return
 	}
 
-	// Cancel any existing discovery loop before starting a new one
 	if p.cancel != nil {
 		p.cancel()
 	}
@@ -52,9 +61,16 @@ func (p *FrigatePlugin) start() {
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel
 
+	var wg sync.WaitGroup
+	p.wait = wg.Wait
+
 	client := logic.NewFrigateClient(fURL, rtcURL)
 	p.bundle.Log().Info("Frigate Plugin Initializing with %s...", fURL)
-	go p.runDiscovery(ctx, client)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		p.runDiscovery(ctx, client)
+	}()
 }
 
 func (p *FrigatePlugin) runDiscovery(ctx context.Context, client logic.FrigateClient) {
@@ -83,6 +99,4 @@ func (p *FrigatePlugin) runDiscovery(ctx context.Context, client logic.FrigateCl
 	}
 }
 
-func NewPlugin() sdk.Plugin {
-	return &FrigatePlugin{}
-}
+func NewPlugin() *FrigatePlugin { return &FrigatePlugin{} }

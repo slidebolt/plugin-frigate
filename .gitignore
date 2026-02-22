@@ -16,3 +16,6 @@ tests/hardware/
 
 # OS Junk
 .DS_Store
+
+# Local notes
+TODO.md
