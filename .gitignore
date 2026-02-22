@@ -1,0 +1,18 @@
+# Binaries
+bin/
+plugin-frigate
+*.test
+*.exe
+
+# Local development
+go.work
+go.work.sum
+
+# Docker Staging (Pre-GitHub)
+.stage/
+
+# Hardware Tests
+tests/hardware/
+
+# OS Junk
+.DS_Store
