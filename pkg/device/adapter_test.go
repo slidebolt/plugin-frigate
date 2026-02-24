@@ -49,7 +49,7 @@ func TestRegisterCamera_PublishesOnlineState(t *testing.T) {
 	if cam.State().Status != "active" {
 		t.Fatalf("expected active status, got %s", cam.State().Status)
 	}
-	if _, ok := cam.Raw()["stream_url"]; !ok {
-		t.Fatalf("expected stream_url in raw state")
+	if _, ok := cam.State().Properties["stream_url"]; !ok {
+		t.Fatalf("expected stream_url in properties")
 	}
 }

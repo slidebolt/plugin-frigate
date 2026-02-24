@@ -9,7 +9,6 @@ import (
 
 	framework "github.com/slidebolt/plugin-framework"
 	"github.com/slidebolt/plugin-frigate/pkg/bundle"
-	sdk "github.com/slidebolt/plugin-sdk"
 )
 
 const lockPath = "/tmp/plugin-frigate.lock"
@@ -47,7 +46,7 @@ func main() {
 
 	framework.Init()
 
-	b, err := sdk.RegisterBundle("plugin-frigate")
+	b, err := framework.RegisterBundle("plugin-frigate")
 	if err != nil {
 		fmt.Printf("Failed to register bundle: %v\n", err)
 		return
