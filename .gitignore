@@ -1,0 +1,24 @@
+# Local environment
+.env
+.env.local
+.env.*
+!.env.example
+
+# Build outputs
+.build/
+bin/
+dist/
+coverage.out
+*.test
+*.out
+
+# Local plugin binaries
+plugin-*
+
+# Logs
+*.log
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
