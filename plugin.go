@@ -25,6 +25,7 @@ type discoveredCamera struct {
 
 type PluginConfig struct {
 	FrigateURL string `json:"frigate_url"`
+	Go2RTCURL  string `json:"go2rtc_url"`
 }
 
 type PluginFrigatePlugin struct {
@@ -57,13 +58,16 @@ func (p *PluginFrigatePlugin) OnInitialize(config runner.Config, state types.Sto
 		p.discovered = make(map[string]*discoveredCamera)
 	}
 
-	// ENV overrides persisted state
-	if fURL := os.Getenv("FRIGATE_URL"); fURL != "" {
+	// ENV overrides persisted state.
+	if fURL := firstEnv("FRIGATE_URL", "PLUGIN_FRIGATE_URL", "PLUGIN_FRIGATE_FRIGATE_URL"); fURL != "" {
 		p.pConfig.FrigateURL = fURL
+	}
+	if rtcURL := firstEnv("FRIGATE_GO2RTC_URL", "FRIGATE_RTC_URL", "GO2RTC_URL", "PLUGIN_FRIGATE_GO2RTC_URL"); rtcURL != "" {
+		p.pConfig.Go2RTCURL = rtcURL
 	}
 
 	if p.pConfig.FrigateURL != "" {
-		p.client = NewFrigateClient(p.pConfig.FrigateURL, os.Getenv("FRIGATE_RTC_URL"))
+		p.client = NewFrigateClient(p.pConfig.FrigateURL, p.pConfig.Go2RTCURL)
 	}
 
 	return types.Manifest{
@@ -343,17 +347,34 @@ func (p *PluginFrigatePlugin) OnCommand(cmd types.Command, entity types.Entity) 
 	if entity.ID == "frigate-config" {
 		var params struct {
 			FrigateURL string `json:"frigate_url"`
+			Go2RTCURL  string `json:"go2rtc_url"`
 		}
-		if err := json.Unmarshal(cmd.Payload, &params); err == nil && params.FrigateURL != "" {
+		if err := json.Unmarshal(cmd.Payload, &params); err == nil {
 			p.mu.Lock()
-			p.pConfig.FrigateURL = params.FrigateURL
-			p.client = NewFrigateClient(params.FrigateURL, "")
+			if params.FrigateURL != "" {
+				p.pConfig.FrigateURL = params.FrigateURL
+			}
+			if params.Go2RTCURL != "" {
+				p.pConfig.Go2RTCURL = params.Go2RTCURL
+			}
+			if p.pConfig.FrigateURL != "" {
+				p.client = NewFrigateClient(p.pConfig.FrigateURL, p.pConfig.Go2RTCURL)
+			}
 			p.mu.Unlock()
 			go p.discover()
 		}
 		return entity, nil
 	}
 	return entity, nil
+}
+
+func firstEnv(keys ...string) string {
+	for _, k := range keys {
+		if v := strings.TrimSpace(os.Getenv(k)); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func (p *PluginFrigatePlugin) OnEvent(evt types.Event, entity types.Entity) (types.Entity, error) {
