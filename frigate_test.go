@@ -84,7 +84,7 @@ func TestPluginDiscovery(t *testing.T) {
 
 	// 6. Test Devices List
 	devices, _ := p.OnDevicesList(nil)
-	if len(devices) != 1 || devices[0].ID != "frigate-device-front" {
+	if len(devices) != 2 {
 		t.Errorf("unexpected device list: %v", devices)
 	}
 

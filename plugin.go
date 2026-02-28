@@ -270,7 +270,6 @@ func (p *PluginFrigatePlugin) OnDevicesList(current []types.Device) ([]types.Dev
 			ID:         id,
 			SourceID:   cam.Name,
 			SourceName: cam.Name,
-			Config:     types.Storage{Meta: "frigate-camera"},
 		}
 		if existing, ok := byID[id]; ok {
 			byID[id] = runner.ReconcileDevice(existing, discoveredDev)
