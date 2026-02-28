@@ -266,13 +266,19 @@ func (p *PluginFrigatePlugin) OnDevicesList(current []types.Device) ([]types.Dev
 
 	for _, cam := range p.discovered {
 		id := p.deviceID(cam.Name)
-		byID[id] = types.Device{
+		dev := types.Device{
 			ID:         id,
 			SourceID:   cam.Name,
 			SourceName: cam.Name,
 			LocalName:  cam.Name,
 			Config:     types.Storage{Meta: "frigate-camera"},
 		}
+		if existing, ok := byID[id]; ok {
+			if existing.LocalName != "" {
+				dev.LocalName = existing.LocalName
+			}
+		}
+		byID[id] = dev
 	}
 
 	out := make([]types.Device, 0, len(byID))
