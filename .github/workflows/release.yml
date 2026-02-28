@@ -54,4 +54,4 @@ jobs:
           VERSION=${GITHUB_REF_NAME#v}
           FILENAME="${{ steps.bin.outputs.name }}_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz"
           tar czf "$FILENAME" ${{ steps.bin.outputs.name }}
-          gh release upload ${{ github.ref_name }} "$FILENAME"
+          gh release upload ${{ github.ref_name }} "$FILENAME" --clobber
