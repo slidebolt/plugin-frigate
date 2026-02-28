@@ -12,7 +12,9 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - uses: softprops/action-gh-release@v2
+      - run: gh release create ${{ github.ref_name }} --title ${{ github.ref_name }} --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
 
   build:
     needs: create-release
@@ -45,14 +47,11 @@ jobs:
           CGO_ENABLED: "0"
         run: go build -trimpath -ldflags="-s -w" -o ${{ steps.bin.outputs.name }} .
 
-      - name: Package
+      - name: Package and upload
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           VERSION=${GITHUB_REF_NAME#v}
           FILENAME="${{ steps.bin.outputs.name }}_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz"
           tar czf "$FILENAME" ${{ steps.bin.outputs.name }}
-          echo "FILENAME=$FILENAME" >> $GITHUB_ENV
-
-      - name: Upload to release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ${{ env.FILENAME }}
+          gh release upload ${{ github.ref_name }} "$FILENAME"
