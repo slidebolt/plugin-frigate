@@ -85,6 +85,8 @@ func (p *PluginFrigatePlugin) OnReady() {
 	go p.runDiscovery()
 }
 
+func (p *PluginFrigatePlugin) OnShutdown() {}
+
 func (p *PluginFrigatePlugin) runDiscovery() {
 	for {
 		p.discover()
