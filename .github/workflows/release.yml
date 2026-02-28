@@ -6,8 +6,16 @@ on:
       - 'v*'
 
 jobs:
-  release:
-    name: Build and Release
+  create-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: softprops/action-gh-release@v2
+
+  build:
+    needs: create-release
     runs-on: ubuntu-latest
     permissions:
       contents: write
