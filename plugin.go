@@ -75,6 +75,7 @@ func (p *PluginFrigatePlugin) OnInitialize(config runner.Config, state types.Sto
 		ID:      "plugin-frigate",
 		Name:    "Frigate Video",
 		Version: "1.1.0",
+		Schemas: types.CoreDomains(),
 	}, state
 }
 
@@ -178,10 +179,10 @@ func (p *PluginFrigatePlugin) emitStateEvent(cam *discoveredCamera) {
 	state := p.buildCameraState(cam)
 	payloadBytes, _ := json.Marshal(state)
 
-	_ = p.config.EventSink.EmitTypedEvent(types.InboundEventTyped[types.GenericPayload]{
+	_ = p.config.EventSink.EmitEvent(types.InboundEvent{
 		DeviceID: deviceID,
 		EntityID: entityID,
-		Payload:  rawToGeneric(payloadBytes),
+		Payload:  json.RawMessage(payloadBytes),
 	})
 }
 
@@ -269,6 +270,14 @@ func (p *PluginFrigatePlugin) OnDevicesList(current []types.Device) ([]types.Dev
 		SourceName: "Frigate System",
 	}
 
+	// Core management device
+	coreID := types.CoreDeviceID("plugin-frigate")
+	byID[coreID] = runner.ReconcileDevice(byID[coreID], types.Device{
+		ID:         coreID,
+		SourceID:   coreID,
+		SourceName: "Frigate Plugin",
+	})
+
 	for _, cam := range p.discovered {
 		id := p.deviceID(cam.Name)
 		discoveredDev := types.Device{
@@ -345,6 +354,14 @@ func (p *PluginFrigatePlugin) OnEntitiesList(deviceID string, current []types.En
 		byID[id] = ent
 	}
 
+	for _, need := range types.CoreEntities("plugin-frigate") {
+		if deviceID == need.DeviceID {
+			if _, exists := byID[need.ID]; !exists {
+				byID[need.ID] = need
+			}
+		}
+	}
+
 	out := make([]types.Entity, 0, len(byID))
 	for _, ent := range byID {
 		out = append(out, ent)
@@ -353,7 +370,7 @@ func (p *PluginFrigatePlugin) OnEntitiesList(deviceID string, current []types.En
 	return out, nil
 }
 
-func (p *PluginFrigatePlugin) OnCommandTyped(req types.CommandRequest[types.GenericPayload], entity types.Entity) (types.Entity, error) {
+func (p *PluginFrigatePlugin) OnCommand(req types.Command, entity types.Entity) (types.Entity, error) {
 	if entity.ID == "frigate-config" {
 		var params struct {
 			FrigateURL string `json:"frigate_url"`
@@ -391,7 +408,7 @@ func firstEnv(keys ...string) string {
 	return ""
 }
 
-func (p *PluginFrigatePlugin) OnEventTyped(evt types.EventTyped[types.GenericPayload], entity types.Entity) (types.Entity, error) {
+func (p *PluginFrigatePlugin) OnEvent(evt types.Event, entity types.Entity) (types.Entity, error) {
 	raw, err := json.Marshal(evt.Payload)
 	if err != nil {
 		return entity, err
@@ -405,8 +422,3 @@ func (p *PluginFrigatePlugin) OnEventTyped(evt types.EventTyped[types.GenericPay
 	return entity, nil
 }
 
-func rawToGeneric(raw []byte) types.GenericPayload {
-	out := types.GenericPayload{}
-	_ = json.Unmarshal(raw, &out)
-	return out
-}

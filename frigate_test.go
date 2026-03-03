@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,10 +13,10 @@ import (
 )
 
 type mockEventSink struct {
-	events []types.InboundEventTyped[types.GenericPayload]
+	events []types.InboundEvent
 }
 
-func (m *mockEventSink) EmitTypedEvent(evt types.InboundEventTyped[types.GenericPayload]) error {
+func (m *mockEventSink) EmitEvent(evt types.InboundEvent) error {
 	m.events = append(m.events, evt)
 	return nil
 }
@@ -70,7 +71,11 @@ func TestPluginDiscovery(t *testing.T) {
 	for _, evt := range sink.events {
 		if evt.DeviceID == "frigate-device-front" {
 			found = true
-			if got, _ := evt.Payload["stream_url"].(string); got != "rtsp://frigate/front" {
+			var payload map[string]any
+			if err := json.Unmarshal(evt.Payload, &payload); err != nil {
+				t.Fatalf("failed to unmarshal payload: %v", err)
+			}
+			if got, _ := payload["stream_url"].(string); got != "rtsp://frigate/front" {
 				t.Errorf("unexpected stream_url: %v", got)
 			}
 		}
