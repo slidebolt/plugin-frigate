@@ -28,3 +28,14 @@ The `plugin-frigate` is a Go application that implements the `runner.Plugin` int
 
 -   **`stream`**: This command can be sent to a camera entity to retrieve its video stream URL.
 -   **Configuration Command**: A command can be sent to the `frigate-system` device to dynamically set the `FRIGATE_URL` and `GO2RTC_URL`.
+
+#### Standalone Discovery Mode
+
+This plugin supports a standalone discovery mode for rapid testing and diagnostics without requiring the full Slidebolt stack (NATS, Gateway, etc.).
+
+To run discovery and output the results to JSON:
+```bash
+./plugin-frigate -discover
+```
+
+**Note**: Ensure any required environment variables (e.g., API keys, URLs) are set before running.

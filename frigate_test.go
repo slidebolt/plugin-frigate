@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -13,10 +12,10 @@ import (
 )
 
 type mockEventSink struct {
-	events []types.InboundEvent
+	events []types.InboundEventTyped[types.GenericPayload]
 }
 
-func (m *mockEventSink) EmitEvent(evt types.InboundEvent) error {
+func (m *mockEventSink) EmitTypedEvent(evt types.InboundEventTyped[types.GenericPayload]) error {
 	m.events = append(m.events, evt)
 	return nil
 }
@@ -40,7 +39,7 @@ func TestPluginDiscovery(t *testing.T) {
 	// 2. Setup Plugin
 	p := NewPlugin()
 	sink := &mockEventSink{}
-	
+
 	// Mock environment
 	_ = os.Setenv("FRIGATE_URL", ts.URL)
 	defer os.Unsetenv("FRIGATE_URL")
@@ -71,10 +70,8 @@ func TestPluginDiscovery(t *testing.T) {
 	for _, evt := range sink.events {
 		if evt.DeviceID == "frigate-device-front" {
 			found = true
-			var state CameraState
-			json.Unmarshal(evt.Payload, &state)
-			if state.StreamURL != "rtsp://frigate/front" {
-				t.Errorf("unexpected stream_url: %v", state.StreamURL)
+			if got, _ := evt.Payload["stream_url"].(string); got != "rtsp://frigate/front" {
+				t.Errorf("unexpected stream_url: %v", got)
 			}
 		}
 	}

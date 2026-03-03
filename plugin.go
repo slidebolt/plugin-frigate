@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -83,6 +84,10 @@ func (p *PluginFrigatePlugin) OnReady() {
 		return
 	}
 	go p.runDiscovery()
+}
+
+func (p *PluginFrigatePlugin) WaitReady(ctx context.Context) error {
+	return nil
 }
 
 func (p *PluginFrigatePlugin) OnShutdown() {}
@@ -173,10 +178,10 @@ func (p *PluginFrigatePlugin) emitStateEvent(cam *discoveredCamera) {
 	state := p.buildCameraState(cam)
 	payloadBytes, _ := json.Marshal(state)
 
-	_ = p.config.EventSink.EmitEvent(types.InboundEvent{
+	_ = p.config.EventSink.EmitTypedEvent(types.InboundEventTyped[types.GenericPayload]{
 		DeviceID: deviceID,
 		EntityID: entityID,
-		Payload:  payloadBytes,
+		Payload:  rawToGeneric(payloadBytes),
 	})
 }
 
@@ -324,7 +329,7 @@ func (p *PluginFrigatePlugin) OnEntitiesList(deviceID string, current []types.En
 			continue
 		}
 		id := p.entityID(cam.Name)
-		
+
 		ent := types.Entity{
 			ID:        id,
 			DeviceID:  deviceID,
@@ -332,7 +337,7 @@ func (p *PluginFrigatePlugin) OnEntitiesList(deviceID string, current []types.En
 			LocalName: "Camera",
 			Actions:   []string{ActionStream},
 		}
-		
+
 		state := p.buildCameraState(cam)
 		store := BindCamera(&ent)
 		_ = store.SetReported(state)
@@ -348,13 +353,17 @@ func (p *PluginFrigatePlugin) OnEntitiesList(deviceID string, current []types.En
 	return out, nil
 }
 
-func (p *PluginFrigatePlugin) OnCommand(cmd types.Command, entity types.Entity) (types.Entity, error) {
+func (p *PluginFrigatePlugin) OnCommandTyped(req types.CommandRequest[types.GenericPayload], entity types.Entity) (types.Entity, error) {
 	if entity.ID == "frigate-config" {
 		var params struct {
 			FrigateURL string `json:"frigate_url"`
 			Go2RTCURL  string `json:"go2rtc_url"`
 		}
-		if err := json.Unmarshal(cmd.Payload, &params); err == nil {
+		raw, err := json.Marshal(req.Payload)
+		if err != nil {
+			return entity, err
+		}
+		if err := json.Unmarshal(raw, &params); err == nil {
 			p.mu.Lock()
 			if params.FrigateURL != "" {
 				p.pConfig.FrigateURL = params.FrigateURL
@@ -382,12 +391,22 @@ func firstEnv(keys ...string) string {
 	return ""
 }
 
-func (p *PluginFrigatePlugin) OnEvent(evt types.Event, entity types.Entity) (types.Entity, error) {
+func (p *PluginFrigatePlugin) OnEventTyped(evt types.EventTyped[types.GenericPayload], entity types.Entity) (types.Entity, error) {
+	raw, err := json.Marshal(evt.Payload)
+	if err != nil {
+		return entity, err
+	}
 	var state CameraState
-	if err := json.Unmarshal(evt.Payload, &state); err != nil {
+	if err := json.Unmarshal(raw, &state); err != nil {
 		return entity, err
 	}
 	store := BindCamera(&entity)
 	_ = store.SetReported(state)
 	return entity, nil
+}
+
+func rawToGeneric(raw []byte) types.GenericPayload {
+	out := types.GenericPayload{}
+	_ = json.Unmarshal(raw, &out)
+	return out
 }
