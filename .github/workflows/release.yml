@@ -11,12 +11,13 @@ on:
         options: [patch, minor, major]
 
 jobs:
-  release:
+  prepare:
     runs-on: ubuntu-latest
     permissions:
       contents: write
     outputs:
       version: ${{ steps.version.outputs.version }}
+      commit_sha: ${{ steps.commit.outputs.commit_sha }}
 
     steps:
       - uses: actions/checkout@v4
@@ -32,7 +33,6 @@ jobs:
         run: |
           grep -E '^	' go.mod | grep 'github.com/slidebolt/sdk' | awk '{print $1"@latest"}' | xargs -r go get
           go mod tidy
-
 
       - name: Test
         run: go test ./...
@@ -52,25 +52,26 @@ jobs:
           esac
           echo "version=v${MAJOR}.${MINOR}.${PATCH}" >> $GITHUB_OUTPUT
 
-      - name: Commit, tag, and push
+      - name: Commit dependency updates
+        id: commit
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add go.mod go.sum
-          git diff --staged --quiet || git commit -m "chore: update sdk deps and release ${{ steps.version.outputs.version }}"
-          git tag ${{ steps.version.outputs.version }}
-          git push origin main --tags
-
-      - name: Create GitHub release
-        run: gh release create ${{ steps.version.outputs.version }} --title ${{ steps.version.outputs.version }} --generate-notes
-        env:
-          GH_TOKEN: ${{ github.token }}
+          if git diff --staged --quiet; then
+            COMMIT_SHA=$(git rev-parse HEAD)
+          else
+            git commit -m "chore: update sdk deps for ${{ steps.version.outputs.version }}"
+            git push origin main
+            COMMIT_SHA=$(git rev-parse HEAD)
+          fi
+          echo "commit_sha=$COMMIT_SHA" >> $GITHUB_OUTPUT
 
   build:
-    needs: release
+    needs: prepare
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
     strategy:
       matrix:
         include:
@@ -82,7 +83,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.release.outputs.version }}
+          ref: ${{ needs.prepare.outputs.commit_sha }}
 
       - uses: actions/setup-go@v5
         with:
@@ -99,12 +100,58 @@ jobs:
           CGO_ENABLED: "0"
         run: go build -trimpath -ldflags="-s -w" -o ${{ steps.bin.outputs.name }} .
 
-      - name: Package and upload
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Package
         run: |
-          VERSION="${{ needs.release.outputs.version }}"
+          VERSION="${{ needs.prepare.outputs.version }}"
           VERSION="${VERSION#v}"
           FILENAME="${{ steps.bin.outputs.name }}_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz"
           tar czf "$FILENAME" ${{ steps.bin.outputs.name }}
-          gh release upload ${{ needs.release.outputs.version }} "$FILENAME" --clobber
+          echo "filename=$FILENAME" >> $GITHUB_OUTPUT
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: '*.tar.gz'
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+          ref: ${{ needs.prepare.outputs.commit_sha }}
+
+      - name: Create and push tag
+        run: |
+          VERSION='${{ needs.prepare.outputs.version }}'
+          COMMIT='${{ needs.prepare.outputs.commit_sha }}'
+          if git ls-remote --tags origin "refs/tags/${VERSION}" | grep -q .; then
+            echo "tag ${VERSION} already exists on origin"
+            exit 1
+          fi
+          git tag "$VERSION" "$COMMIT"
+          git push origin "refs/tags/$VERSION"
+
+      - name: Create GitHub release
+        run: gh release create ${{ needs.prepare.outputs.version }} --target ${{ needs.prepare.outputs.commit_sha }} --title ${{ needs.prepare.outputs.version }} --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Upload release assets
+        run: |
+          gh release upload ${{ needs.prepare.outputs.version }} dist/*/*.tar.gz --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
