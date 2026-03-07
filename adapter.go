@@ -41,6 +41,9 @@ type discoveredCamera struct {
 type PluginConfig struct {
 	FrigateURL string `json:"frigate_url"`
 	Go2RTCURL  string `json:"go2rtc_url"`
+	// Optional externally reachable base URLs used for emitted stream/image URLs.
+	FrigatePublicURL string `json:"frigate_public_url"`
+	Go2RTCPublicURL  string `json:"go2rtc_public_url"`
 
 	MQTTHost        string `json:"mqtt_host"`
 	MQTTPort        int    `json:"mqtt_port"`
@@ -183,6 +186,12 @@ func (p *PluginFrigatePlugin) OnInitialize(config runner.Config, state types.Sto
 	}
 	if rtcURL := firstEnv("FRIGATE_GO2RTC_URL", "FRIGATE_RTC_URL", "GO2RTC_URL", "PLUGIN_FRIGATE_GO2RTC_URL"); rtcURL != "" {
 		p.pConfig.Go2RTCURL = rtcURL
+	}
+	if fPublicURL := firstEnv("FRIGATE_PUBLIC_URL", "PLUGIN_FRIGATE_PUBLIC_URL", "PLUGIN_FRIGATE_FRIGATE_PUBLIC_URL"); fPublicURL != "" {
+		p.pConfig.FrigatePublicURL = fPublicURL
+	}
+	if rtcPublicURL := firstEnv("FRIGATE_GO2RTC_PUBLIC_URL", "FRIGATE_RTC_PUBLIC_URL", "GO2RTC_PUBLIC_URL", "PLUGIN_FRIGATE_GO2RTC_PUBLIC_URL"); rtcPublicURL != "" {
+		p.pConfig.Go2RTCPublicURL = rtcPublicURL
 	}
 	if v := firstEnv("FRIGATE_MQTT_HOST", "MQTT_HOST", "PLUGIN_FRIGATE_MQTT_HOST"); v != "" {
 		p.pConfig.MQTTHost = v
@@ -528,7 +537,13 @@ func (p *PluginFrigatePlugin) sanitize(s string) string {
 }
 
 func (p *PluginFrigatePlugin) go2rtcBaseURL() string {
-	base := strings.TrimSpace(p.pConfig.Go2RTCURL)
+	base := strings.TrimSpace(p.pConfig.Go2RTCPublicURL)
+	if base == "" {
+		base = strings.TrimSpace(p.pConfig.FrigatePublicURL)
+	}
+	if base == "" {
+		base = strings.TrimSpace(p.pConfig.Go2RTCURL)
+	}
 	if base == "" {
 		base = strings.TrimSpace(p.pConfig.FrigateURL)
 	}
@@ -933,8 +948,10 @@ func (p *PluginFrigatePlugin) OnEntitiesList(deviceID string, current []types.En
 func (p *PluginFrigatePlugin) OnCommand(req types.Command, entity types.Entity) (types.Entity, error) {
 	if entity.ID == "frigate-config" {
 		var params struct {
-			FrigateURL string `json:"frigate_url"`
-			Go2RTCURL  string `json:"go2rtc_url"`
+			FrigateURL       string `json:"frigate_url"`
+			Go2RTCURL        string `json:"go2rtc_url"`
+			FrigatePublicURL string `json:"frigate_public_url"`
+			Go2RTCPublicURL  string `json:"go2rtc_public_url"`
 		}
 		raw, err := json.Marshal(req.Payload)
 		if err != nil {
@@ -947,6 +964,12 @@ func (p *PluginFrigatePlugin) OnCommand(req types.Command, entity types.Entity) 
 			}
 			if params.Go2RTCURL != "" {
 				p.pConfig.Go2RTCURL = params.Go2RTCURL
+			}
+			if params.FrigatePublicURL != "" {
+				p.pConfig.FrigatePublicURL = params.FrigatePublicURL
+			}
+			if params.Go2RTCPublicURL != "" {
+				p.pConfig.Go2RTCPublicURL = params.Go2RTCPublicURL
 			}
 			if p.pConfig.FrigateURL != "" {
 				p.client = frigate.NewClient(p.pConfig.FrigateURL, p.pConfig.Go2RTCURL)
