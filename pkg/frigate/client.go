@@ -1,17 +1,29 @@
-package main
+// Package frigate provides a client for the Frigate NVR API
+package frigate
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 )
 
+// Error constants for protocol-level errors
+var (
+	ErrOffline      = errors.New("device is offline")
+	ErrUnauthorized = errors.New("authentication failed")
+	ErrTimeout      = errors.New("connection timeout")
+	ErrAPIFailure   = errors.New("API request failed")
+)
+
+// FrigateConfig represents the Frigate server configuration
 type FrigateConfig struct {
 	Cameras map[string]CameraConfig `json:"cameras"`
 }
 
+// CameraConfig represents a single camera's configuration
 type CameraConfig struct {
 	Name    string `json:"name"`
 	Enabled bool   `json:"enabled"`
@@ -40,6 +52,7 @@ type CameraConfig struct {
 	} `json:"objects"`
 }
 
+// RTCStreamInfo represents WebRTC stream information
 type RTCStreamInfo struct {
 	Producers []struct {
 		URL        string   `json:"url"`
@@ -48,37 +61,54 @@ type RTCStreamInfo struct {
 	} `json:"producers"`
 }
 
+// FrigateStats represents camera statistics
 type FrigateStats struct {
 	Cameras map[string]CameraStats `json:"cameras"`
 }
 
+// CameraStats represents statistics for a single camera
 type CameraStats struct {
 	CameraFPS  float64 `json:"camera_fps"`
 	ProcessFPS float64 `json:"process_fps"`
 }
 
-type FrigateClient interface {
+// FrigateEvent represents a detection event
+type FrigateEvent struct {
+	ID          string  `json:"id"`
+	Camera      string  `json:"camera"`
+	Label       string  `json:"label"`
+	StartTime   float64 `json:"start_time"`
+	EndTime     float64 `json:"end_time"`
+	HasSnapshot bool    `json:"has_snapshot"`
+	HasClip     bool    `json:"has_clip"`
+}
+
+// Client defines the interface for Frigate API operations
+type Client interface {
 	GetConfig() (*FrigateConfig, error)
 	GetStats() (*FrigateStats, error)
 	GetRTCStreams() (map[string]RTCStreamInfo, error)
 	GetEvents(limit int) ([]FrigateEvent, error)
 }
 
-type HttpClient struct {
+// HTTPClient implements the Client interface using HTTP
+type HTTPClient struct {
 	FrigateURL string
 	RTCURL     string
 	client     *http.Client
 }
 
-func NewFrigateClient(fURL, rtcURL string) *HttpClient {
-	return &HttpClient{
+// NewClient creates a new Frigate HTTP client
+func NewClient(fURL, rtcURL string) *HTTPClient {
+	return &HTTPClient{
 		FrigateURL: strings.TrimSuffix(fURL, "/"),
 		RTCURL:     strings.TrimSuffix(rtcURL, "/"),
 		client:     &http.Client{Timeout: 5 * time.Second},
 	}
 }
 
-func (c *HttpClient) GetConfig() (*FrigateConfig, error) {
+// GetConfig fetches the Frigate configuration
+func (c *HTTPClient) GetConfig() (*FrigateConfig, error) {
 	var cfg FrigateConfig
 	if err := c.get(c.FrigateURL+"/api/config", &cfg); err != nil {
 		return nil, err
@@ -86,7 +116,8 @@ func (c *HttpClient) GetConfig() (*FrigateConfig, error) {
 	return &cfg, nil
 }
 
-func (c *HttpClient) GetStats() (*FrigateStats, error) {
+// GetStats fetches camera statistics
+func (c *HTTPClient) GetStats() (*FrigateStats, error) {
 	var stats FrigateStats
 	if err := c.get(c.FrigateURL+"/api/stats", &stats); err != nil {
 		return nil, err
@@ -94,7 +125,8 @@ func (c *HttpClient) GetStats() (*FrigateStats, error) {
 	return &stats, nil
 }
 
-func (c *HttpClient) GetRTCStreams() (map[string]RTCStreamInfo, error) {
+// GetRTCStreams fetches WebRTC stream information
+func (c *HTTPClient) GetRTCStreams() (map[string]RTCStreamInfo, error) {
 	base := c.RTCURL
 	if base == "" {
 		base = c.FrigateURL
@@ -106,17 +138,8 @@ func (c *HttpClient) GetRTCStreams() (map[string]RTCStreamInfo, error) {
 	return streams, nil
 }
 
-type FrigateEvent struct {
-	ID          string  `json:"id"`
-	Camera      string  `json:"camera"`
-	Label       string  `json:"label"`
-	StartTime   float64 `json:"start_time"`
-	EndTime     float64 `json:"end_time"`
-	HasSnapshot bool    `json:"has_snapshot"`
-	HasClip     bool    `json:"has_clip"`
-}
-
-func (c *HttpClient) GetEvents(limit int) ([]FrigateEvent, error) {
+// GetEvents fetches detection events
+func (c *HTTPClient) GetEvents(limit int) ([]FrigateEvent, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -127,7 +150,7 @@ func (c *HttpClient) GetEvents(limit int) ([]FrigateEvent, error) {
 	return events, nil
 }
 
-func (c *HttpClient) get(url string, target any) error {
+func (c *HTTPClient) get(url string, target any) error {
 	resp, err := c.client.Get(url)
 	if err != nil {
 		return err

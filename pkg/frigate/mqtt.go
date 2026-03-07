@@ -1,4 +1,4 @@
-package main
+package frigate
 
 import (
 	"fmt"
@@ -8,21 +8,32 @@ import (
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
-type mqttRuntime struct {
+// MQTTConfig holds MQTT connection configuration
+type MQTTConfig struct {
+	Host        string
+	Port        int
+	User        string
+	Password    string
+	TopicPrefix string
+}
+
+// MQTTRuntime manages the MQTT connection
+type MQTTRuntime struct {
 	client mqtt.Client
 	done   chan struct{}
 }
 
-func startMQTT(cfg PluginConfig, onMessage func(camera, key, payload string)) (*mqttRuntime, error) {
-	host := strings.TrimSpace(cfg.MQTTHost)
+// StartMQTT initializes and connects to the MQTT broker
+func StartMQTT(cfg MQTTConfig, onMessage func(camera, key, payload string)) (*MQTTRuntime, error) {
+	host := strings.TrimSpace(cfg.Host)
 	if host == "" {
 		return nil, nil
 	}
-	port := cfg.MQTTPort
+	port := cfg.Port
 	if port <= 0 {
 		port = 1883
 	}
-	prefix := strings.Trim(strings.TrimSpace(cfg.MQTTTopicPrefix), "/")
+	prefix := strings.Trim(strings.TrimSpace(cfg.TopicPrefix), "/")
 	if prefix == "" {
 		prefix = "frigate"
 	}
@@ -33,13 +44,13 @@ func startMQTT(cfg PluginConfig, onMessage func(camera, key, payload string)) (*
 	opts.SetAutoReconnect(true)
 	opts.SetConnectRetry(true)
 	opts.SetConnectRetryInterval(2 * time.Second)
-	if strings.TrimSpace(cfg.MQTTUser) != "" {
-		opts.SetUsername(cfg.MQTTUser)
-		opts.SetPassword(cfg.MQTTPassword)
+	if strings.TrimSpace(cfg.User) != "" {
+		opts.SetUsername(cfg.User)
+		opts.SetPassword(cfg.Password)
 	}
 	opts.SetDefaultPublishHandler(func(_ mqtt.Client, _ mqtt.Message) {})
 
-	rt := &mqttRuntime{done: make(chan struct{})}
+	rt := &MQTTRuntime{done: make(chan struct{})}
 	opts.OnConnect = func(c mqtt.Client) {
 		topic := prefix + "/#"
 		token := c.Subscribe(topic, 1, func(_ mqtt.Client, m mqtt.Message) {
@@ -71,7 +82,8 @@ func startMQTT(cfg PluginConfig, onMessage func(camera, key, payload string)) (*
 	return rt, nil
 }
 
-func (m *mqttRuntime) stop() {
+// Stop disconnects from the MQTT broker
+func (m *MQTTRuntime) Stop() {
 	if m == nil {
 		return
 	}

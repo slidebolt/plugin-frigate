@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/slidebolt/plugin-frigate/pkg/frigate"
 	runner "github.com/slidebolt/sdk-runner"
 	"github.com/slidebolt/sdk-types"
 )
@@ -27,14 +28,14 @@ const (
 var haLabels = []string{"bird", "car", "cat", "dog", "package", "person"}
 
 type discoveredCamera struct {
-	Name       string                  `json:"name"`
-	Config     CameraConfig            `json:"config"`
-	Stats      CameraStats             `json:"stats"`
-	RTCStream  RTCStreamInfo           `json:"rtc_stream"`
-	LastEvents map[string]FrigateEvent `json:"last_events"`
-	AllEvents  []FrigateEvent          `json:"all_events"`
-	Online     bool                    `json:"online"`
-	LastSeen   time.Time               `json:"last_seen"`
+	Name       string                          `json:"name"`
+	Config     frigate.CameraConfig            `json:"config"`
+	Stats      frigate.CameraStats             `json:"stats"`
+	RTCStream  frigate.RTCStreamInfo           `json:"rtc_stream"`
+	LastEvents map[string]frigate.FrigateEvent `json:"last_events"`
+	AllEvents  []frigate.FrigateEvent          `json:"all_events"`
+	Online     bool                            `json:"online"`
+	LastSeen   time.Time                       `json:"last_seen"`
 }
 
 type PluginConfig struct {
@@ -49,46 +50,60 @@ type PluginConfig struct {
 }
 
 type PluginFrigatePlugin struct {
-	mu         sync.RWMutex
-	discovered map[string]*discoveredCamera
-	client     FrigateClient
-	config     runner.Config
-	pConfig    PluginConfig
+	mu      sync.RWMutex
+	client  frigate.Client
+	config  runner.Config
+	pConfig PluginConfig
 
 	mqttMu    sync.RWMutex
 	mqttState map[string]map[string]string
-	mqtt      *mqttRuntime
+	mqtt      *frigate.MQTTRuntime
 }
 
 type streamState struct {
-	URL    string `json:"url"`
-	Format string `json:"format,omitempty"`
-	Kind   string `json:"kind,omitempty"`
-	Online bool   `json:"online"`
+	Type       string           `json:"type"`
+	URL        string           `json:"url"`
+	Format     string           `json:"format,omitempty"`
+	Kind       string           `json:"kind,omitempty"`
+	Online     bool             `json:"online"`
+	SyncStatus types.SyncStatus `json:"sync_status,omitempty"`
 }
 
 type imageState struct {
-	URL    string `json:"url"`
-	Format string `json:"format,omitempty"`
-	Online bool   `json:"online"`
+	Type       string           `json:"type"`
+	URL        string           `json:"url"`
+	Format     string           `json:"format,omitempty"`
+	Online     bool             `json:"online"`
+	SyncStatus types.SyncStatus `json:"sync_status,omitempty"`
 }
 
 type frigateEventState struct {
-	Camera       string `json:"camera"`
-	Label        string `json:"label"`
-	LastEventID  string `json:"last_event_id"`
-	LastEventAt  string `json:"last_event_time"`
-	HasSnapshot  bool   `json:"has_snapshot"`
-	HasClip      bool   `json:"has_clip"`
-	EventPresent bool   `json:"event_present"`
+	Type         string           `json:"type"`
+	Camera       string           `json:"camera"`
+	Label        string           `json:"label"`
+	LastEventID  string           `json:"last_event_id"`
+	LastEventAt  string           `json:"last_event_time"`
+	HasSnapshot  bool             `json:"has_snapshot"`
+	HasClip      bool             `json:"has_clip"`
+	EventPresent bool             `json:"event_present"`
+	SyncStatus   types.SyncStatus `json:"sync_status,omitempty"`
 }
 
 type frigateHASensorState struct {
-	Value       string `json:"value,omitempty"`
-	Count       int    `json:"count,omitempty"`
-	ActiveCount int    `json:"active_count,omitempty"`
-	Occupancy   string `json:"occupancy,omitempty"`
-	Available   bool   `json:"available"`
+	Type        string           `json:"type"`
+	Value       string           `json:"value,omitempty"`
+	Count       int              `json:"count,omitempty"`
+	ActiveCount int              `json:"active_count,omitempty"`
+	Occupancy   string           `json:"occupancy,omitempty"`
+	Available   bool             `json:"available"`
+	SyncStatus  types.SyncStatus `json:"sync_status,omitempty"`
+}
+
+// availabilityState represents the state of a binary_sensor.availability entity
+type availabilityState struct {
+	Type       string           `json:"type"`
+	Available  bool             `json:"available"`
+	SyncStatus types.SyncStatus `json:"sync_status,omitempty"`
 }
 
 type streamSpec struct {
@@ -103,13 +118,12 @@ type streamSpec struct {
 type labelAgg struct {
 	Count       int
 	ActiveCount int
-	LastEvent   *FrigateEvent
+	LastEvent   *frigate.FrigateEvent
 }
 
 func NewPlugin() *PluginFrigatePlugin {
 	return &PluginFrigatePlugin{
-		discovered: make(map[string]*discoveredCamera),
-		mqttState:  make(map[string]map[string]string),
+		mqttState: make(map[string]map[string]string),
 	}
 }
 
@@ -156,20 +170,10 @@ func (p *PluginFrigatePlugin) OnInitialize(config runner.Config, state types.Sto
 	p.config = config
 	if len(state.Data) > 0 {
 		var stored struct {
-			Config     PluginConfig                 `json:"config"`
-			Discovered map[string]*discoveredCamera `json:"discovered"`
+			Config PluginConfig `json:"config"`
 		}
 		if err := json.Unmarshal(state.Data, &stored); err == nil {
 			p.pConfig = stored.Config
-			p.discovered = stored.Discovered
-		}
-	}
-	if p.discovered == nil {
-		p.discovered = make(map[string]*discoveredCamera)
-	}
-	for _, cam := range p.discovered {
-		if cam.LastEvents == nil {
-			cam.LastEvents = make(map[string]FrigateEvent)
 		}
 	}
 
@@ -205,7 +209,7 @@ func (p *PluginFrigatePlugin) OnInitialize(config runner.Config, state types.Sto
 	}
 
 	if p.pConfig.FrigateURL != "" {
-		p.client = NewFrigateClient(p.pConfig.FrigateURL, p.pConfig.Go2RTCURL)
+		p.client = frigate.NewClient(p.pConfig.FrigateURL, p.pConfig.Go2RTCURL)
 	}
 
 	schemas := append([]types.DomainDescriptor{}, types.CoreDomains()...)
@@ -225,7 +229,13 @@ func (p *PluginFrigatePlugin) OnReady() {
 		return
 	}
 	if strings.TrimSpace(p.pConfig.MQTTHost) != "" {
-		rt, err := startMQTT(p.pConfig, func(camera, key, payload string) {
+		rt, err := frigate.StartMQTT(frigate.MQTTConfig{
+			Host:        p.pConfig.MQTTHost,
+			Port:        p.pConfig.MQTTPort,
+			User:        p.pConfig.MQTTUser,
+			Password:    p.pConfig.MQTTPassword,
+			TopicPrefix: p.pConfig.MQTTTopicPrefix,
+		}, func(camera, key, payload string) {
 			p.updateMQTTState(camera, key, payload)
 		})
 		if err != nil {
@@ -236,7 +246,6 @@ func (p *PluginFrigatePlugin) OnReady() {
 			p.mqttMu.Unlock()
 		}
 	}
-	go p.runDiscovery()
 }
 
 func (p *PluginFrigatePlugin) WaitReady(ctx context.Context) error {
@@ -249,26 +258,19 @@ func (p *PluginFrigatePlugin) OnShutdown() {
 	p.mqtt = nil
 	p.mqttMu.Unlock()
 	if rt != nil {
-		rt.stop()
+		rt.Stop()
 	}
 }
 
-func (p *PluginFrigatePlugin) runDiscovery() {
-	for {
-		p.discover()
-		time.Sleep(1 * time.Minute)
-	}
-}
-
-func newestEventsByCameraLabel(events []FrigateEvent) map[string]map[string]FrigateEvent {
-	byCamera := make(map[string]map[string]FrigateEvent)
+func newestEventsByCameraLabel(events []frigate.FrigateEvent) map[string]map[string]frigate.FrigateEvent {
+	byCamera := make(map[string]map[string]frigate.FrigateEvent)
 	for _, evt := range events {
 		if strings.TrimSpace(evt.Camera) == "" || strings.TrimSpace(evt.Label) == "" {
 			continue
 		}
 		camEvents, ok := byCamera[evt.Camera]
 		if !ok {
-			camEvents = make(map[string]FrigateEvent)
+			camEvents = make(map[string]frigate.FrigateEvent)
 			byCamera[evt.Camera] = camEvents
 		}
 		current, exists := camEvents[evt.Label]
@@ -279,19 +281,19 @@ func newestEventsByCameraLabel(events []FrigateEvent) map[string]map[string]Frig
 	return byCamera
 }
 
-func (p *PluginFrigatePlugin) discover() {
+// discover queries Frigate and returns camera data - stateless, no storage
+func (p *PluginFrigatePlugin) discover() ([]*discoveredCamera, error) {
 	p.mu.RLock()
 	client := p.client
 	p.mu.RUnlock()
 
 	if client == nil {
-		return
+		return nil, frigate.ErrOffline
 	}
 
 	cfg, err := client.GetConfig()
 	if err != nil {
-		log.Printf("Frigate Discovery: failed to get config: %v", err)
-		return
+		return nil, fmt.Errorf("%w: %v", frigate.ErrAPIFailure, err)
 	}
 
 	stats, _ := client.GetStats()
@@ -299,26 +301,19 @@ func (p *PluginFrigatePlugin) discover() {
 	events, _ := client.GetEvents(1000)
 	eventIndex := newestEventsByCameraLabel(events)
 
-	var updated []*discoveredCamera
+	var cameras []*discoveredCamera
 
-	p.mu.Lock()
-	active := make(map[string]struct{})
 	for name, camCfg := range cfg.Cameras {
 		if !camCfg.Enabled {
 			continue
 		}
-		active[name] = struct{}{}
 
-		cam, ok := p.discovered[name]
-		if !ok {
-			cam = &discoveredCamera{Name: name}
-			p.discovered[name] = cam
-		}
-		cam.Config = camCfg
-		cam.Online = true
-		cam.LastSeen = time.Now()
-		if cam.LastEvents == nil {
-			cam.LastEvents = make(map[string]FrigateEvent)
+		cam := &discoveredCamera{
+			Name:       name,
+			Config:     camCfg,
+			Online:     true,
+			LastSeen:   time.Now(),
+			LastEvents: make(map[string]frigate.FrigateEvent),
 		}
 
 		if stats != nil {
@@ -333,33 +328,17 @@ func (p *PluginFrigatePlugin) discover() {
 		}
 		if byLabel, ok := eventIndex[name]; ok {
 			cam.LastEvents = byLabel
-		} else {
-			cam.LastEvents = map[string]FrigateEvent{}
 		}
-		cam.AllEvents = cam.AllEvents[:0]
 		for _, evt := range events {
 			if evt.Camera == name {
 				cam.AllEvents = append(cam.AllEvents, evt)
 			}
 		}
 
-		updated = append(updated, cam)
+		cameras = append(cameras, cam)
 	}
 
-	// Mark stale.
-	for name, cam := range p.discovered {
-		if _, ok := active[name]; !ok {
-			cam.Online = false
-			updated = append(updated, cam)
-		}
-	}
-	p.mu.Unlock()
-
-	for _, cam := range updated {
-		p.emitMainStreamEvent(cam)
-		p.emitFrigateEventSensor(cam, "person")
-		p.emitFrigateEventSensor(cam, "car")
-	}
+	return cameras, nil
 }
 
 func (p *PluginFrigatePlugin) updateMQTTState(camera, key, payload string) {
@@ -392,6 +371,7 @@ func (p *PluginFrigatePlugin) emitMainStreamEvent(cam *discoveredCamera) {
 		return
 	}
 	state := streamState{
+		Type:   "state_changed",
 		URL:    p.go2rtcURLf("/stream.html?src=%s", cam.Name),
 		Format: "html",
 		Kind:   "main",
@@ -434,11 +414,13 @@ func (p *PluginFrigatePlugin) streamSpecs(_ string, online bool) []streamSpec {
 
 func (p *PluginFrigatePlugin) frigateEventState(cam *discoveredCamera, label string) frigateEventState {
 	state := frigateEventState{
+		Type:         "state_changed",
 		Camera:       cam.Name,
 		Label:        label,
 		HasSnapshot:  false,
 		HasClip:      false,
 		EventPresent: false,
+		SyncStatus:   types.SyncStatusSynced,
 	}
 	if evt, ok := cam.LastEvents[label]; ok {
 		state.LastEventID = evt.ID
@@ -574,11 +556,9 @@ func (p *PluginFrigatePlugin) OnStorageUpdate(current types.Storage) (types.Stor
 	defer p.mu.RUnlock()
 
 	data := struct {
-		Config     PluginConfig                 `json:"config"`
-		Discovered map[string]*discoveredCamera `json:"discovered"`
+		Config PluginConfig `json:"config"`
 	}{
-		Config:     p.pConfig,
-		Discovered: p.discovered,
+		Config: p.pConfig,
 	}
 	encoded, _ := json.Marshal(data)
 	current.Data = encoded
@@ -599,7 +579,8 @@ func (p *PluginFrigatePlugin) OnDeviceDelete(id string) error {
 
 func (p *PluginFrigatePlugin) OnDevicesList(current []types.Device) ([]types.Device, error) {
 	p.mu.RLock()
-	defer p.mu.RUnlock()
+	client := p.client
+	p.mu.RUnlock()
 
 	byID := make(map[string]types.Device)
 	for _, dev := range current {
@@ -619,17 +600,27 @@ func (p *PluginFrigatePlugin) OnDevicesList(current []types.Device) ([]types.Dev
 		SourceName: "Frigate Plugin",
 	})
 
-	for _, cam := range p.discovered {
-		id := p.deviceID(cam.Name)
-		discoveredDev := types.Device{
-			ID:         id,
-			SourceID:   cam.Name,
-			SourceName: cam.Name,
-		}
-		if existing, ok := byID[id]; ok {
-			byID[id] = runner.ReconcileDevice(existing, discoveredDev)
+	// Lazy discovery: fetch cameras fresh each time
+	if client != nil {
+		cameras, err := p.discover()
+		if err != nil {
+			// Log the error but don't fail the entire list - return what we have
+			// The error will be visible in the plugin health entity
+			log.Printf("Frigate Plugin: discovery failed: %v", err)
 		} else {
-			byID[id] = runner.ReconcileDevice(types.Device{}, discoveredDev)
+			for _, cam := range cameras {
+				id := p.deviceID(cam.Name)
+				discoveredDev := types.Device{
+					ID:         id,
+					SourceID:   cam.Name,
+					SourceName: cam.Name,
+				}
+				if existing, ok := byID[id]; ok {
+					byID[id] = runner.ReconcileDevice(existing, discoveredDev)
+				} else {
+					byID[id] = runner.ReconcileDevice(types.Device{}, discoveredDev)
+				}
+			}
 		}
 	}
 
@@ -664,11 +655,30 @@ func (p *PluginFrigatePlugin) addHASensor(byID map[string]types.Entity, deviceID
 		Domain:    domainFrigateHA,
 		LocalName: name,
 	}
+	// Set standardized sync status for all HA sensors
+	payload.SyncStatus = types.SyncStatusSynced
+	payload.Type = "state_changed"
 	setReported(&ent, payload)
 	byID[ent.ID] = ent
 }
 
-func tsFor(evt *FrigateEvent) string {
+// addAvailabilityEntity creates a binary_sensor.availability entity
+func (p *PluginFrigatePlugin) addAvailabilityEntity(byID map[string]types.Entity, deviceID, entID, name string, available bool) {
+	ent := types.Entity{
+		ID:        entID,
+		DeviceID:  deviceID,
+		Domain:    "binary_sensor",
+		LocalName: name,
+	}
+	setReported(&ent, availabilityState{
+		Type:       "state_changed",
+		Available:  available,
+		SyncStatus: types.SyncStatusSynced,
+	})
+	byID[ent.ID] = ent
+}
+
+func tsFor(evt *frigate.FrigateEvent) string {
 	if evt == nil || evt.StartTime <= 0 {
 		return "Unavailable"
 	}
@@ -802,9 +812,6 @@ func getMQTTOrDefault(p *PluginFrigatePlugin, camera, key, fallback string) stri
 }
 
 func (p *PluginFrigatePlugin) OnEntitiesList(deviceID string, current []types.Entity) ([]types.Entity, error) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
 	byID := make(map[string]types.Entity)
 	for _, ent := range current {
 		byID[ent.ID] = ent
@@ -819,53 +826,92 @@ func (p *PluginFrigatePlugin) OnEntitiesList(deviceID string, current []types.En
 		}
 	}
 
-	for _, cam := range p.discovered {
-		if p.deviceID(cam.Name) != deviceID {
-			continue
-		}
+	// Lazy discovery: fetch cameras fresh each time
+	p.mu.RLock()
+	client := p.client
+	p.mu.RUnlock()
 
-		for _, spec := range p.streamSpecs(cam.Name, cam.Online) {
-			ent := types.Entity{
-				ID:        p.streamEntityID(cam.Name, spec.Suffix),
-				DeviceID:  deviceID,
-				Domain:    domainStream,
-				LocalName: spec.Local,
+	// Always add availability entity for frigate-system device
+	// It reflects whether the Frigate API is configured and reachable
+	if deviceID == "frigate-system" {
+		if client == nil {
+			// No client configured - unavailable
+			p.addAvailabilityEntity(byID, deviceID, "availability", "Frigate Availability", false)
+		}
+	}
+
+	if client != nil {
+		cameras, err := p.discover()
+		if err != nil {
+			// Log the error but don't fail the entire list - return what we have
+			log.Printf("Frigate Plugin: discovery failed: %v", err)
+
+			// Add availability entity for system device showing API is unavailable
+			if deviceID == "frigate-system" {
+				p.addAvailabilityEntity(byID, deviceID, "availability", "Frigate Availability", false)
 			}
-			setReported(&ent, streamState{
-				URL:    p.go2rtcURLf(spec.Path, cam.Name),
-				Format: spec.Format,
-				Kind:   spec.Kind,
-				Online: spec.IsOnline,
-			})
-			byID[ent.ID] = ent
-		}
-
-		img := types.Entity{
-			ID:        p.imageEntityID(cam.Name, "frame-jpeg"),
-			DeviceID:  deviceID,
-			Domain:    domainImage,
-			LocalName: "Frame JPEG",
-		}
-		setReported(&img, imageState{
-			URL:    p.go2rtcURLf("/api/frame.jpeg?src=%s", cam.Name),
-			Format: "jpeg",
-			Online: cam.Online,
-		})
-		byID[img.ID] = img
-
-		for _, label := range []string{"person", "car"} {
-			localLabel := strings.ToUpper(label[:1]) + label[1:]
-			ent := types.Entity{
-				ID:        p.sensorEntityID(cam.Name, label),
-				DeviceID:  deviceID,
-				Domain:    domainFrigateEvent,
-				LocalName: localLabel + " Events",
+		} else {
+			// Add availability entity for system device showing API is available
+			if deviceID == "frigate-system" {
+				p.addAvailabilityEntity(byID, deviceID, "availability", "Frigate Availability", true)
 			}
-			setReported(&ent, p.frigateEventState(cam, label))
-			byID[ent.ID] = ent
-		}
 
-		p.addHAEntitiesForCamera(byID, cam, deviceID)
+			for _, cam := range cameras {
+				if p.deviceID(cam.Name) != deviceID {
+					continue
+				}
+
+				// Add availability entity for camera
+				p.addAvailabilityEntity(byID, deviceID, "availability", cam.Name+" Availability", cam.Online)
+
+				for _, spec := range p.streamSpecs(cam.Name, cam.Online) {
+					ent := types.Entity{
+						ID:        p.streamEntityID(cam.Name, spec.Suffix),
+						DeviceID:  deviceID,
+						Domain:    domainStream,
+						LocalName: spec.Local,
+					}
+					setReported(&ent, streamState{
+						Type:       "state_changed",
+						URL:        p.go2rtcURLf(spec.Path, cam.Name),
+						Format:     spec.Format,
+						Kind:       spec.Kind,
+						Online:     spec.IsOnline,
+						SyncStatus: types.SyncStatusSynced,
+					})
+					byID[ent.ID] = ent
+				}
+
+				img := types.Entity{
+					ID:        p.imageEntityID(cam.Name, "frame-jpeg"),
+					DeviceID:  deviceID,
+					Domain:    domainImage,
+					LocalName: "Frame JPEG",
+				}
+				setReported(&img, imageState{
+					Type:       "state_changed",
+					URL:        p.go2rtcURLf("/api/frame.jpeg?src=%s", cam.Name),
+					Format:     "jpeg",
+					Online:     cam.Online,
+					SyncStatus: types.SyncStatusSynced,
+				})
+				byID[img.ID] = img
+
+				for _, label := range []string{"person", "car"} {
+					localLabel := strings.ToUpper(label[:1]) + label[1:]
+					ent := types.Entity{
+						ID:        p.sensorEntityID(cam.Name, label),
+						DeviceID:  deviceID,
+						Domain:    domainFrigateEvent,
+						LocalName: localLabel + " Events",
+					}
+					setReported(&ent, p.frigateEventState(cam, label))
+					byID[ent.ID] = ent
+				}
+
+				p.addHAEntitiesForCamera(byID, cam, deviceID)
+			}
+		}
 	}
 
 	for _, need := range types.CoreEntities("plugin-frigate") {
@@ -903,10 +949,10 @@ func (p *PluginFrigatePlugin) OnCommand(req types.Command, entity types.Entity) 
 				p.pConfig.Go2RTCURL = params.Go2RTCURL
 			}
 			if p.pConfig.FrigateURL != "" {
-				p.client = NewFrigateClient(p.pConfig.FrigateURL, p.pConfig.Go2RTCURL)
+				p.client = frigate.NewClient(p.pConfig.FrigateURL, p.pConfig.Go2RTCURL)
 			}
 			p.mu.Unlock()
-			go p.discover()
+			// Discovery now happens lazily in OnDevicesList/OnEntitiesList
 		}
 		return entity, nil
 	}
