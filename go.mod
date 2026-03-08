@@ -4,7 +4,7 @@ go 1.25.7
 
 require (
 	github.com/eclipse/paho.mqtt.golang v1.5.1
-	github.com/slidebolt/sdk-runner v1.20.1
+	github.com/slidebolt/sdk-runner v1.20.2
 	github.com/slidebolt/sdk-types v1.20.3
 )
 
