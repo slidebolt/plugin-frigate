@@ -23,3 +23,5 @@ plugin-*
 .vscode/
 .idea/
 TASKS/
+
+scripts/.release_guard
