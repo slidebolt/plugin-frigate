@@ -39,10 +39,10 @@ func TestFrigateNoShadowRegistries(t *testing.T) {
 
 	_, storage := p.OnInitialize(runner.Config{}, types.Storage{})
 
-	// Trigger discovery via OnDevicesList
-	devices, err := p.OnDevicesList(nil)
+	// Trigger discovery via OnDeviceDiscover
+	devices, err := p.OnDeviceDiscover(nil)
 	if err != nil {
-		t.Fatalf("OnDevicesList failed: %v", err)
+		t.Fatalf("OnDeviceDiscover failed: %v", err)
 	}
 
 	// Verify camera device exists
@@ -59,15 +59,15 @@ func TestFrigateNoShadowRegistries(t *testing.T) {
 	}
 
 	// Update storage
-	_, err = p.OnStorageUpdate(storage)
+	_, err = p.OnConfigUpdate(storage)
 	if err != nil {
-		t.Fatalf("OnStorageUpdate failed: %v", err)
+		t.Fatalf("OnConfigUpdate failed: %v", err)
 	}
 
 	// Query devices again - should still find camera
-	devices, err = p.OnDevicesList(nil)
+	devices, err = p.OnDeviceDiscover(nil)
 	if err != nil {
-		t.Fatalf("OnDevicesList failed on second call: %v", err)
+		t.Fatalf("OnDeviceDiscover failed on second call: %v", err)
 	}
 
 	foundCam = false
@@ -111,12 +111,12 @@ func TestFrigateRawStorePersistence(t *testing.T) {
 	_, storage := p.OnInitialize(runner.Config{}, types.Storage{})
 
 	// Trigger discovery
-	_, _ = p.OnDevicesList(nil)
+	_, _ = p.OnDeviceDiscover(nil)
 
 	// Update storage
-	updatedStorage, err := p.OnStorageUpdate(storage)
+	updatedStorage, err := p.OnConfigUpdate(storage)
 	if err != nil {
-		t.Fatalf("OnStorageUpdate failed: %v", err)
+		t.Fatalf("OnConfigUpdate failed: %v", err)
 	}
 
 	// Verify storage contains data
@@ -166,9 +166,9 @@ func TestJSONResponseFormat(t *testing.T) {
 
 	// Get entities for the camera
 	deviceID := "frigate-device-cam1"
-	entities, err := p.OnEntitiesList(deviceID, nil)
+	entities, err := p.OnEntityDiscover(deviceID, nil)
 	if err != nil {
-		t.Fatalf("OnEntitiesList failed: %v", err)
+		t.Fatalf("OnEntityDiscover failed: %v", err)
 	}
 
 	// Verify each entity has valid JSON format

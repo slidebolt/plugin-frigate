@@ -13,9 +13,9 @@ import (
 func TestFrigateSystemAvailabilityEntity_UsesCanonicalID(t *testing.T) {
 	p := NewPlugin()
 
-	entities, err := p.OnEntitiesList("frigate-system", nil)
+	entities, err := p.OnEntityDiscover("frigate-system", nil)
 	if err != nil {
-		t.Fatalf("OnEntitiesList failed: %v", err)
+		t.Fatalf("OnEntityDiscover failed: %v", err)
 	}
 
 	for _, e := range entities {
@@ -51,9 +51,9 @@ func TestFrigateDiscovery_ReturnsQueryableDevice(t *testing.T) {
 	defer os.Unsetenv("FRIGATE_GO2RTC_URL")
 
 	p.OnInitialize(runner.Config{}, types.Storage{})
-	devices, err := p.OnDevicesList(nil)
+	devices, err := p.OnDeviceDiscover(nil)
 	if err != nil {
-		t.Fatalf("OnDevicesList failed: %v", err)
+		t.Fatalf("OnDeviceDiscover failed: %v", err)
 	}
 
 	wantID := p.deviceID(mockCam)

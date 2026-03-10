@@ -93,9 +93,9 @@ func TestFrigateErrorStatusMapping(t *testing.T) {
 
 			// Get entities for the camera
 			deviceID := "frigate-device-cam1"
-			entities, err := p.OnEntitiesList(deviceID, nil)
+			entities, err := p.OnEntityDiscover(deviceID, nil)
 			if err != nil {
-				t.Fatalf("OnEntitiesList failed: %v", err)
+				t.Fatalf("OnEntityDiscover failed: %v", err)
 			}
 
 			// Check that at least one entity has the correct sync status
@@ -153,9 +153,9 @@ func TestSyncStatusFieldStandardValues(t *testing.T) {
 
 	// Get entities for the camera
 	deviceID := "frigate-device-cam1"
-	entities, err := p.OnEntitiesList(deviceID, nil)
+	entities, err := p.OnEntityDiscover(deviceID, nil)
 	if err != nil {
-		t.Fatalf("OnEntitiesList failed: %v", err)
+		t.Fatalf("OnEntityDiscover failed: %v", err)
 	}
 
 	// Valid sync status values according to SDK standard
@@ -257,9 +257,9 @@ func TestSyncStatusNotInSync(t *testing.T) {
 
 	// Get entities for the camera
 	deviceID := "frigate-device-cam1"
-	entities, err := p.OnEntitiesList(deviceID, nil)
+	entities, err := p.OnEntityDiscover(deviceID, nil)
 	if err != nil {
-		t.Fatalf("OnEntitiesList failed: %v", err)
+		t.Fatalf("OnEntityDiscover failed: %v", err)
 	}
 
 	// Ensure no entity uses "in_sync"

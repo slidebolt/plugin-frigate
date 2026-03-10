@@ -41,9 +41,9 @@ func TestFrigateAvailabilityEntity(t *testing.T) {
 	p.OnInitialize(runner.Config{}, types.Storage{})
 
 	// Test system device availability entity
-	systemEntities, err := p.OnEntitiesList("frigate-system", nil)
+	systemEntities, err := p.OnEntityDiscover("frigate-system", nil)
 	if err != nil {
-		t.Fatalf("OnEntitiesList for frigate-system failed: %v", err)
+		t.Fatalf("OnEntityDiscover for frigate-system failed: %v", err)
 	}
 
 	systemAvailabilityFound := false
@@ -65,9 +65,9 @@ func TestFrigateAvailabilityEntity(t *testing.T) {
 	}
 
 	// Test camera device availability entity
-	cameraEntities, err := p.OnEntitiesList("frigate-device-cam1", nil)
+	cameraEntities, err := p.OnEntityDiscover("frigate-device-cam1", nil)
 	if err != nil {
-		t.Fatalf("OnEntitiesList for camera failed: %v", err)
+		t.Fatalf("OnEntityDiscover for camera failed: %v", err)
 	}
 
 	cameraAvailabilityFound := false
@@ -126,9 +126,9 @@ func TestAvailabilityEntityReportsCorrectStatus(t *testing.T) {
 	p.OnInitialize(runner.Config{}, types.Storage{})
 
 	// Get camera entities
-	cameraEntities, err := p.OnEntitiesList("frigate-device-cam1", nil)
+	cameraEntities, err := p.OnEntityDiscover("frigate-device-cam1", nil)
 	if err != nil {
-		t.Fatalf("OnEntitiesList failed: %v", err)
+		t.Fatalf("OnEntityDiscover failed: %v", err)
 	}
 
 	// Check availability entity reports online status
@@ -166,9 +166,9 @@ func TestAvailabilityEntityOnApiFailure(t *testing.T) {
 	p.OnInitialize(runner.Config{}, types.Storage{})
 
 	// Try to get camera entities - discovery will fail
-	cameraEntities, err := p.OnEntitiesList("frigate-device-cam1", nil)
+	cameraEntities, err := p.OnEntityDiscover("frigate-device-cam1", nil)
 	if err != nil {
-		t.Fatalf("OnEntitiesList failed: %v", err)
+		t.Fatalf("OnEntityDiscover failed: %v", err)
 	}
 
 	// If availability entity exists, it should report unavailable

@@ -533,7 +533,25 @@ func (p *PluginFrigatePlugin) haEntityID(name, key string) string {
 }
 
 func (p *PluginFrigatePlugin) sanitize(s string) string {
-	return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(s)), " ", "-")
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" {
+		return "unknown"
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_' {
+			b.WriteByte(ch)
+			continue
+		}
+		b.WriteByte('-')
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		return "unknown"
+	}
+	return out
 }
 
 func (p *PluginFrigatePlugin) go2rtcBaseURL() string {
@@ -566,7 +584,7 @@ func (p *PluginFrigatePlugin) OnHealthCheck() (string, error) {
 	return "perfect", nil
 }
 
-func (p *PluginFrigatePlugin) OnStorageUpdate(current types.Storage) (types.Storage, error) {
+func (p *PluginFrigatePlugin) OnConfigUpdate(current types.Storage) (types.Storage, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -592,7 +610,7 @@ func (p *PluginFrigatePlugin) OnDeviceDelete(id string) error {
 	return nil
 }
 
-func (p *PluginFrigatePlugin) OnDevicesList(current []types.Device) ([]types.Device, error) {
+func (p *PluginFrigatePlugin) OnDeviceDiscover(current []types.Device) ([]types.Device, error) {
 	p.mu.RLock()
 	client := p.client
 	p.mu.RUnlock()
@@ -826,7 +844,7 @@ func getMQTTOrDefault(p *PluginFrigatePlugin, camera, key, fallback string) stri
 	return fallback
 }
 
-func (p *PluginFrigatePlugin) OnEntitiesList(deviceID string, current []types.Entity) ([]types.Entity, error) {
+func (p *PluginFrigatePlugin) OnEntityDiscover(deviceID string, current []types.Entity) ([]types.Entity, error) {
 	byID := make(map[string]types.Entity)
 	for _, ent := range current {
 		byID[ent.ID] = ent
@@ -975,7 +993,7 @@ func (p *PluginFrigatePlugin) OnCommand(req types.Command, entity types.Entity) 
 				p.client = frigate.NewClient(p.pConfig.FrigateURL, p.pConfig.Go2RTCURL)
 			}
 			p.mu.Unlock()
-			// Discovery now happens lazily in OnDevicesList/OnEntitiesList
+			// Discovery now happens lazily in OnDeviceDiscover/OnEntityDiscover
 		}
 		return entity, nil
 	}

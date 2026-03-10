@@ -32,11 +32,11 @@ func TestErrorsBubbledToUI(t *testing.T) {
 	p.OnInitialize(runner.Config{}, types.Storage{})
 
 	// Discovery should handle errors gracefully
-	devices, err := p.OnDevicesList(nil)
+	devices, err := p.OnDeviceDiscover(nil)
 
-	// OnDevicesList should not return an error, but should return base devices
+	// OnDeviceDiscover should not return an error, but should return base devices
 	if err != nil {
-		t.Fatalf("OnDevicesList should not fail, got error: %v", err)
+		t.Fatalf("OnDeviceDiscover should not fail, got error: %v", err)
 	}
 
 	// Should still have system devices even when API fails
@@ -142,9 +142,9 @@ func TestAvailabilityEntityCreation(t *testing.T) {
 
 	// Get entities for the camera
 	deviceID := "frigate-device-cam1"
-	entities, err := p.OnEntitiesList(deviceID, nil)
+	entities, err := p.OnEntityDiscover(deviceID, nil)
 	if err != nil {
-		t.Fatalf("OnEntitiesList failed: %v", err)
+		t.Fatalf("OnEntityDiscover failed: %v", err)
 	}
 
 	// Check if any entity reports availability status

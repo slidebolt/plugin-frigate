@@ -45,7 +45,7 @@ func TestNoShadowRegistry(t *testing.T) {
 	_ = p
 }
 
-// TestLazyDiscovery verifies that discovery happens in OnDevicesList, not in background loops
+// TestLazyDiscovery verifies that discovery happens in OnDeviceDiscover, not in background loops
 func TestLazyDiscovery(t *testing.T) {
 	discoveryCount := 0
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -80,24 +80,24 @@ func TestLazyDiscovery(t *testing.T) {
 	// Give a moment for any background goroutines to start
 	// In the old implementation, runDiscovery would start here
 
-	// OnDevicesList should trigger discovery
-	_, err := p.OnDevicesList(nil)
+	// OnDeviceDiscover should trigger discovery
+	_, err := p.OnDeviceDiscover(nil)
 	if err != nil {
-		t.Fatalf("OnDevicesList failed: %v", err)
+		t.Fatalf("OnDeviceDiscover failed: %v", err)
 	}
 
 	if discoveryCount == 0 {
-		t.Error("OnDevicesList did not trigger discovery")
+		t.Error("OnDeviceDiscover did not trigger discovery")
 	}
 
-	// Multiple calls to OnDevicesList should trigger discovery each time (no caching)
-	_, err = p.OnDevicesList(nil)
+	// Multiple calls to OnDeviceDiscover should trigger discovery each time (no caching)
+	_, err = p.OnDeviceDiscover(nil)
 	if err != nil {
-		t.Fatalf("OnDevicesList failed: %v", err)
+		t.Fatalf("OnDeviceDiscover failed: %v", err)
 	}
 
 	if discoveryCount < 2 {
-		t.Error("OnDevicesList is caching results - should discover fresh each time")
+		t.Error("OnDeviceDiscover is caching results - should discover fresh each time")
 	}
 }
 
@@ -129,8 +129,8 @@ func TestRawStoreUsage(t *testing.T) {
 	// Initialize with empty storage
 	_, storage := p.OnInitialize(runner.Config{}, types.Storage{})
 
-	// After OnDevicesList, storage should contain raw data
-	devices, _ := p.OnDevicesList(nil)
+	// After OnDeviceDiscover, storage should contain raw data
+	devices, _ := p.OnDeviceDiscover(nil)
 
 	// Check that discovered devices are returned
 	found := false
@@ -142,13 +142,13 @@ func TestRawStoreUsage(t *testing.T) {
 	}
 
 	if !found {
-		t.Error("expected to find cam1 device in OnDevicesList results")
+		t.Error("expected to find cam1 device in OnDeviceDiscover results")
 	}
 
 	// Storage update should happen
-	_, err := p.OnStorageUpdate(storage)
+	_, err := p.OnConfigUpdate(storage)
 	if err != nil {
-		t.Fatalf("OnStorageUpdate failed: %v", err)
+		t.Fatalf("OnConfigUpdate failed: %v", err)
 	}
 }
 
@@ -179,13 +179,13 @@ func TestDeviceMetadataInStorage(t *testing.T) {
 
 	_, storage := p.OnInitialize(runner.Config{}, types.Storage{})
 
-	// Trigger discovery via OnDevicesList
-	p.OnDevicesList(nil)
+	// Trigger discovery via OnDeviceDiscover
+	p.OnDeviceDiscover(nil)
 
 	// Update storage
-	updatedStorage, err := p.OnStorageUpdate(storage)
+	updatedStorage, err := p.OnConfigUpdate(storage)
 	if err != nil {
-		t.Fatalf("OnStorageUpdate failed: %v", err)
+		t.Fatalf("OnConfigUpdate failed: %v", err)
 	}
 
 	// Verify storage contains expected data

@@ -54,18 +54,18 @@ func TestCamera02EntitiesExposeFullyQualifiedManagedURLs(t *testing.T) {
 	manifest, _ := p.OnInitialize(runner.Config{EventSink: sink}, types.Storage{})
 	p.discover()
 
-	devices, err := p.OnDevicesList(nil)
+	devices, err := p.OnDeviceDiscover(nil)
 	if err != nil {
-		t.Fatalf("OnDevicesList failed: %v", err)
+		t.Fatalf("OnDeviceDiscover failed: %v", err)
 	}
 	sort.Slice(devices, func(i, j int) bool { return devices[i].ID < devices[j].ID })
 	if !hasDevice(devices, "frigate-device-camera_02") {
 		t.Fatalf("camera device missing: %+v", devices)
 	}
 
-	entities, err := p.OnEntitiesList("frigate-device-camera_02", nil)
+	entities, err := p.OnEntityDiscover("frigate-device-camera_02", nil)
 	if err != nil {
-		t.Fatalf("OnEntitiesList failed: %v", err)
+		t.Fatalf("OnEntityDiscover failed: %v", err)
 	}
 	sort.Slice(entities, func(i, j int) bool { return entities[i].ID < entities[j].ID })
 
@@ -184,9 +184,9 @@ func TestCameraURLsPreferPublicConfiguredBases(t *testing.T) {
 	defer os.Unsetenv("FRIGATE_GO2RTC_PUBLIC_URL")
 
 	p.OnInitialize(runner.Config{}, types.Storage{})
-	entities, err := p.OnEntitiesList("frigate-device-camera_02", nil)
+	entities, err := p.OnEntityDiscover("frigate-device-camera_02", nil)
 	if err != nil {
-		t.Fatalf("OnEntitiesList failed: %v", err)
+		t.Fatalf("OnEntityDiscover failed: %v", err)
 	}
 
 	main := getEntity(entities, "frigate-stream-camera_02-main")
@@ -253,9 +253,9 @@ func TestFrigateConfigCommandCanUpdatePublicURLs(t *testing.T) {
 		t.Fatalf("OnCommand failed: %v", err)
 	}
 
-	entities, err := p.OnEntitiesList("frigate-device-camera_02", nil)
+	entities, err := p.OnEntityDiscover("frigate-device-camera_02", nil)
 	if err != nil {
-		t.Fatalf("OnEntitiesList failed: %v", err)
+		t.Fatalf("OnEntityDiscover failed: %v", err)
 	}
 	main := getEntity(entities, "frigate-stream-camera_02-main")
 	if main == nil {
