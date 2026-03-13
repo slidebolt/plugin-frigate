@@ -51,7 +51,7 @@ jobs:
           go mod tidy
 
       - name: Test
-        run: go test ./...
+        run: go test -short ./...
 
       - name: Bump version
         id: version

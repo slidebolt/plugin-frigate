@@ -7,9 +7,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"testing"
-
-	runner "github.com/slidebolt/sdk-runner"
-	"github.com/slidebolt/sdk-types"
 )
 
 // TestFrigateNoShadowRegistries verifies devices are properly registered and queryable
@@ -37,15 +34,14 @@ func TestFrigateNoShadowRegistries(t *testing.T) {
 	defer os.Unsetenv("FRIGATE_URL")
 	defer os.Unsetenv("FRIGATE_GO2RTC_URL")
 
-	_, storage := p.OnInitialize(runner.Config{}, types.Storage{})
+	testInit(p)
 
-	// Trigger discovery via OnDeviceDiscover
-	devices, err := p.OnDeviceDiscover(nil)
+	// Trigger discovery
+	devices, err := p.discoverDevices()
 	if err != nil {
-		t.Fatalf("OnDeviceDiscover failed: %v", err)
+		t.Fatalf("discoverDevices failed: %v", err)
 	}
 
-	// Verify camera device exists
 	foundCam := false
 	for _, dev := range devices {
 		if dev.SourceID == "cam1" {
@@ -58,16 +54,10 @@ func TestFrigateNoShadowRegistries(t *testing.T) {
 		t.Error("device not found via API - may be stored in shadow registry instead of RawStore")
 	}
 
-	// Update storage
-	_, err = p.OnConfigUpdate(storage)
+	// Query devices again - should still find camera (no caching, fresh query each time)
+	devices, err = p.discoverDevices()
 	if err != nil {
-		t.Fatalf("OnConfigUpdate failed: %v", err)
-	}
-
-	// Query devices again - should still find camera
-	devices, err = p.OnDeviceDiscover(nil)
-	if err != nil {
-		t.Fatalf("OnDeviceDiscover failed on second call: %v", err)
+		t.Fatalf("discoverDevices failed on second call: %v", err)
 	}
 
 	foundCam = false
@@ -79,11 +69,11 @@ func TestFrigateNoShadowRegistries(t *testing.T) {
 	}
 
 	if !foundCam {
-		t.Error("camera device not found on second query - may be in shadow registry")
+		t.Error("camera device not found on second query")
 	}
 }
 
-// TestFrigateRawStorePersistence verifies devices are stored in RawStore
+// TestFrigateRawStorePersistence verifies devices are reflected in config storage
 func TestFrigateRawStorePersistence(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -108,23 +98,17 @@ func TestFrigateRawStorePersistence(t *testing.T) {
 	defer os.Unsetenv("FRIGATE_URL")
 	defer os.Unsetenv("FRIGATE_GO2RTC_URL")
 
-	_, storage := p.OnInitialize(runner.Config{}, types.Storage{})
+	testInit(p)
 
 	// Trigger discovery
-	_, _ = p.OnDeviceDiscover(nil)
+	_, _ = p.discoverDevices()
 
-	// Update storage
-	updatedStorage, err := p.OnConfigUpdate(storage)
-	if err != nil {
-		t.Fatalf("OnConfigUpdate failed: %v", err)
-	}
-
-	// Verify storage contains data
+	// Verify config storage contains data
+	updatedStorage := configStorage(p)
 	if len(updatedStorage.Data) == 0 {
 		t.Error("storage is empty - expected camera metadata to be persisted to RawStore")
 	}
 
-	// Verify storage can be unmarshaled correctly
 	var stored struct {
 		Config PluginConfig `json:"config"`
 	}
@@ -162,26 +146,22 @@ func TestJSONResponseFormat(t *testing.T) {
 	defer os.Unsetenv("FRIGATE_URL")
 	defer os.Unsetenv("FRIGATE_GO2RTC_URL")
 
-	p.OnInitialize(runner.Config{}, types.Storage{})
+	testInit(p)
 
-	// Get entities for the camera
 	deviceID := "frigate-device-cam1"
-	entities, err := p.OnEntityDiscover(deviceID, nil)
+	entities, err := p.entitiesForDevice(deviceID)
 	if err != nil {
-		t.Fatalf("OnEntityDiscover failed: %v", err)
+		t.Fatalf("entitiesForDevice failed: %v", err)
 	}
 
-	// Verify each entity has valid JSON format
 	for _, ent := range entities {
 		if len(ent.Data.Reported) > 0 {
-			// Try to unmarshal into generic map
 			var state map[string]interface{}
 			if err := json.Unmarshal(ent.Data.Reported, &state); err != nil {
 				t.Errorf("failed to decode entity %s: %v", ent.ID, err)
 				continue
 			}
 
-			// Verify ID field types are correct (strings, not numbers)
 			for key, val := range state {
 				if key == "id" || key == "camera" || key == "label" || key == "value" {
 					if _, ok := val.(float64); ok {

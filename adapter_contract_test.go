@@ -5,17 +5,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"testing"
-
-	runner "github.com/slidebolt/sdk-runner"
-	"github.com/slidebolt/sdk-types"
 )
 
 func TestFrigateSystemAvailabilityEntity_UsesCanonicalID(t *testing.T) {
 	p := NewPlugin()
 
-	entities, err := p.OnEntityDiscover("frigate-system", nil)
+	entities, err := p.entitiesForDevice("frigate-system")
 	if err != nil {
-		t.Fatalf("OnEntityDiscover failed: %v", err)
+		t.Fatalf("entitiesForDevice failed: %v", err)
 	}
 
 	for _, e := range entities {
@@ -50,10 +47,10 @@ func TestFrigateDiscovery_ReturnsQueryableDevice(t *testing.T) {
 	defer os.Unsetenv("FRIGATE_URL")
 	defer os.Unsetenv("FRIGATE_GO2RTC_URL")
 
-	p.OnInitialize(runner.Config{}, types.Storage{})
-	devices, err := p.OnDeviceDiscover(nil)
+	testInit(p)
+	devices, err := p.discoverDevices()
 	if err != nil {
-		t.Fatalf("OnDeviceDiscover failed: %v", err)
+		t.Fatalf("discoverDevices failed: %v", err)
 	}
 
 	wantID := p.deviceID(mockCam)

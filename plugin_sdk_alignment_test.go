@@ -1,15 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
 	"testing"
-
-	runner "github.com/slidebolt/sdk-runner"
-	"github.com/slidebolt/sdk-types"
 )
 
 // TestNoShadowRegistry verifies that the plugin does not maintain a local device registry
@@ -37,21 +36,22 @@ func TestNoShadowRegistry(t *testing.T) {
 	defer os.Unsetenv("FRIGATE_URL")
 	defer os.Unsetenv("FRIGATE_GO2RTC_URL")
 
-	p.OnInitialize(runner.Config{}, types.Storage{})
+	testInit(p)
 
-	// Verify that the plugin doesn't have a discovered field (shadow registry)
-	// by checking that we cannot access it (it was removed from the struct)
-	// The plugin should NOT store devices locally - this test verifies the field is gone
+	// The plugin should NOT store devices locally — verified by absence of a "discovered" field.
 	_ = p
 }
 
-// TestLazyDiscovery verifies that discovery happens in OnDeviceDiscover, not in background loops
+// TestLazyDiscovery verifies that discovery happens in discoverDevices, not in background loops
 func TestLazyDiscovery(t *testing.T) {
+	var mu sync.Mutex
 	discoveryCount := 0
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/config":
+			mu.Lock()
 			discoveryCount++
+			mu.Unlock()
 			fmt.Fprintln(w, `{"cameras":{"cam1":{"enabled":true,"name":"cam1","detect":{"enabled":true},"motion":{"enabled":true},"record":{"enabled":true},"snapshots":{"enabled":true},"review":{"alerts":{"enabled":true},"detections":{"enabled":true}},"objects":{"track":["person"]}}}}`)
 		case "/api/stats":
 			fmt.Fprintln(w, `{"cameras":{"cam1":{"camera_fps":15.0,"process_fps":14.5}}}`)
@@ -72,36 +72,40 @@ func TestLazyDiscovery(t *testing.T) {
 	defer os.Unsetenv("FRIGATE_URL")
 	defer os.Unsetenv("FRIGATE_GO2RTC_URL")
 
-	p.OnInitialize(runner.Config{}, types.Storage{})
+	testInit(p)
 
-	// OnReady should NOT trigger discovery in lazy mode
-	p.OnReady()
+	// Start should NOT trigger a blocking discovery (it may start background goroutines)
+	_ = p.Start(context.Background())
+	defer p.Stop()
 
-	// Give a moment for any background goroutines to start
-	// In the old implementation, runDiscovery would start here
-
-	// OnDeviceDiscover should trigger discovery
-	_, err := p.OnDeviceDiscover(nil)
+	// discoverDevices should trigger discovery
+	_, err := p.discoverDevices()
 	if err != nil {
-		t.Fatalf("OnDeviceDiscover failed: %v", err)
+		t.Fatalf("discoverDevices failed: %v", err)
 	}
 
-	if discoveryCount == 0 {
-		t.Error("OnDeviceDiscover did not trigger discovery")
+	mu.Lock()
+	count1 := discoveryCount
+	mu.Unlock()
+	if count1 == 0 {
+		t.Error("discoverDevices did not trigger discovery")
 	}
 
-	// Multiple calls to OnDeviceDiscover should trigger discovery each time (no caching)
-	_, err = p.OnDeviceDiscover(nil)
+	// Multiple calls should each trigger discovery (no caching)
+	_, err = p.discoverDevices()
 	if err != nil {
-		t.Fatalf("OnDeviceDiscover failed: %v", err)
+		t.Fatalf("discoverDevices failed on second call: %v", err)
 	}
 
-	if discoveryCount < 2 {
-		t.Error("OnDeviceDiscover is caching results - should discover fresh each time")
+	mu.Lock()
+	count2 := discoveryCount
+	mu.Unlock()
+	if count2 < 2 {
+		t.Error("discoverDevices is caching results - should discover fresh each time")
 	}
 }
 
-// TestRawStoreUsage verifies that protocol-specific metadata uses RawStore
+// TestRawStoreUsage verifies that protocol-specific metadata is captured in config storage
 func TestRawStoreUsage(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -126,13 +130,11 @@ func TestRawStoreUsage(t *testing.T) {
 	defer os.Unsetenv("FRIGATE_URL")
 	defer os.Unsetenv("FRIGATE_GO2RTC_URL")
 
-	// Initialize with empty storage
-	_, storage := p.OnInitialize(runner.Config{}, types.Storage{})
+	testInit(p)
 
-	// After OnDeviceDiscover, storage should contain raw data
-	devices, _ := p.OnDeviceDiscover(nil)
+	// After discoverDevices, cam1 should be present
+	devices, _ := p.discoverDevices()
 
-	// Check that discovered devices are returned
 	found := false
 	for _, d := range devices {
 		if d.SourceID == "cam1" {
@@ -142,17 +144,17 @@ func TestRawStoreUsage(t *testing.T) {
 	}
 
 	if !found {
-		t.Error("expected to find cam1 device in OnDeviceDiscover results")
+		t.Error("expected to find cam1 device in discoverDevices results")
 	}
 
-	// Storage update should happen
-	_, err := p.OnConfigUpdate(storage)
-	if err != nil {
-		t.Fatalf("OnConfigUpdate failed: %v", err)
+	// configStorage serialises the current config
+	storage := configStorage(p)
+	if len(storage.Data) == 0 {
+		t.Error("configStorage returned empty data")
 	}
 }
 
-// TestDeviceMetadataInStorage verifies camera metadata is stored in RawStore
+// TestDeviceMetadataInStorage verifies camera metadata is captured in config storage
 func TestDeviceMetadataInStorage(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -177,23 +179,15 @@ func TestDeviceMetadataInStorage(t *testing.T) {
 	defer os.Unsetenv("FRIGATE_URL")
 	defer os.Unsetenv("FRIGATE_GO2RTC_URL")
 
-	_, storage := p.OnInitialize(runner.Config{}, types.Storage{})
+	testInit(p)
+	p.discoverDevices()
 
-	// Trigger discovery via OnDeviceDiscover
-	p.OnDeviceDiscover(nil)
+	updatedStorage := configStorage(p)
 
-	// Update storage
-	updatedStorage, err := p.OnConfigUpdate(storage)
-	if err != nil {
-		t.Fatalf("OnConfigUpdate failed: %v", err)
-	}
-
-	// Verify storage contains expected data
 	if len(updatedStorage.Data) == 0 {
 		t.Error("storage is empty - expected camera metadata to be persisted")
 	}
 
-	// Parse storage to verify structure
 	var stored struct {
 		Config PluginConfig `json:"config"`
 	}

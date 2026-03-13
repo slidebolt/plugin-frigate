@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/slidebolt/plugin-frigate/pkg/frigate"
-	runner "github.com/slidebolt/sdk-runner"
 	"github.com/slidebolt/sdk-types"
 )
 
@@ -29,14 +28,14 @@ func TestErrorsBubbledToUI(t *testing.T) {
 	defer os.Unsetenv("FRIGATE_URL")
 	defer os.Unsetenv("FRIGATE_GO2RTC_URL")
 
-	p.OnInitialize(runner.Config{}, types.Storage{})
+	testInit(p)
 
 	// Discovery should handle errors gracefully
-	devices, err := p.OnDeviceDiscover(nil)
+	devices, err := p.discoverDevices()
 
-	// OnDeviceDiscover should not return an error, but should return base devices
+	// discoverDevices should not return an error, but should return base devices
 	if err != nil {
-		t.Fatalf("OnDeviceDiscover should not fail, got error: %v", err)
+		t.Fatalf("discoverDevices should not fail, got error: %v", err)
 	}
 
 	// Should still have system devices even when API fails
@@ -68,26 +67,21 @@ func TestErrorConstants(t *testing.T) {
 	}
 }
 
-// TestSyncStatusOnFailure verifies entities have sync status set to failed on errors
+// TestSyncStatusOnFailure verifies that runCommand does not fail for unknown entities
 func TestSyncStatusOnFailure(t *testing.T) {
-	// Create a test scenario where entity update fails
 	p := NewPlugin()
 
-	// Create an entity
+	// Create an entity with an unknown ID (not frigate-config)
 	entity := types.Entity{
 		ID:       "test-entity",
 		DeviceID: "test-device",
 		Domain:   "test",
 	}
 
-	// The OnCommand handler should set sync status on error
-	// For now, test that the handler doesn't panic and returns the entity
-	result, err := p.OnCommand(types.Command{}, entity)
+	// runCommand should return nil for unknown entity IDs
+	err := p.runCommand(types.Command{}, entity)
 	if err != nil {
 		t.Errorf("OnCommand should not return error for unknown entity, got: %v", err)
-	}
-	if result.ID != entity.ID {
-		t.Error("OnCommand should return the same entity")
 	}
 }
 
@@ -138,17 +132,16 @@ func TestAvailabilityEntityCreation(t *testing.T) {
 	defer os.Unsetenv("FRIGATE_URL")
 	defer os.Unsetenv("FRIGATE_GO2RTC_URL")
 
-	p.OnInitialize(runner.Config{}, types.Storage{})
+	testInit(p)
 
 	// Get entities for the camera
 	deviceID := "frigate-device-cam1"
-	entities, err := p.OnEntityDiscover(deviceID, nil)
+	entities, err := p.entitiesForDevice(deviceID)
 	if err != nil {
-		t.Fatalf("OnEntityDiscover failed: %v", err)
+		t.Fatalf("entitiesForDevice failed: %v", err)
 	}
 
 	// Check if any entity reports availability status
-	// Currently we're checking that entities have online status in their reported state
 	hasOnlineStatus := false
 	for _, ent := range entities {
 		if len(ent.Data.Reported) > 0 {
@@ -169,9 +162,6 @@ func TestAvailabilityEntityCreation(t *testing.T) {
 
 // TestEntityErrorState verifies that entity reported state includes error field on failure
 func TestEntityErrorState(t *testing.T) {
-	// This test documents the expected behavior: when operations fail,
-	// the entity's Reported state should include an error field
-
 	entity := types.Entity{
 		ID:       "test-entity",
 		DeviceID: "test-device",
@@ -193,10 +183,5 @@ func TestEntityErrorState(t *testing.T) {
 
 // TestRemoveOpaqueLogs verifies that log.Printf is not used for error reporting in handlers
 func TestRemoveOpaqueLogs(t *testing.T) {
-	// This is a documentation test - it verifies the requirement that
-	// log.Printf should not be used in OnCommand and OnEvent handlers
-	// for error reporting. Errors should be returned instead.
-
-	// The actual verification would require checking the code, not runtime behavior
 	t.Log("Requirement: Replace log.Printf with returned errors in OnCommand and OnEvent handlers")
 }

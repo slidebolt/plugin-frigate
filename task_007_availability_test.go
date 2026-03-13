@@ -8,9 +8,6 @@ import (
 	"os"
 	"strings"
 	"testing"
-
-	runner "github.com/slidebolt/sdk-runner"
-	"github.com/slidebolt/sdk-types"
 )
 
 // TestFrigateAvailabilityEntity verifies availability entities exist for system and cameras
@@ -38,12 +35,12 @@ func TestFrigateAvailabilityEntity(t *testing.T) {
 	defer os.Unsetenv("FRIGATE_URL")
 	defer os.Unsetenv("FRIGATE_GO2RTC_URL")
 
-	p.OnInitialize(runner.Config{}, types.Storage{})
+	testInit(p)
 
 	// Test system device availability entity
-	systemEntities, err := p.OnEntityDiscover("frigate-system", nil)
+	systemEntities, err := p.entitiesForDevice("frigate-system")
 	if err != nil {
-		t.Fatalf("OnEntityDiscover for frigate-system failed: %v", err)
+		t.Fatalf("entitiesForDevice for frigate-system failed: %v", err)
 	}
 
 	systemAvailabilityFound := false
@@ -65,9 +62,9 @@ func TestFrigateAvailabilityEntity(t *testing.T) {
 	}
 
 	// Test camera device availability entity
-	cameraEntities, err := p.OnEntityDiscover("frigate-device-cam1", nil)
+	cameraEntities, err := p.entitiesForDevice("frigate-device-cam1")
 	if err != nil {
-		t.Fatalf("OnEntityDiscover for camera failed: %v", err)
+		t.Fatalf("entitiesForDevice for camera failed: %v", err)
 	}
 
 	cameraAvailabilityFound := false
@@ -88,8 +85,6 @@ func TestFrigateAvailabilityEntity(t *testing.T) {
 		t.Log("no availability entity found for camera device - Task 007 may not be complete")
 	}
 
-	// For now, log the requirement but don't fail the test
-	// This allows the test to document what's needed
 	if !systemAvailabilityFound || !cameraAvailabilityFound {
 		t.Log("Requirement: Add binary_sensor.availability entities for:")
 		t.Log("  - Frigate system device (frigate-system)")
@@ -99,7 +94,6 @@ func TestFrigateAvailabilityEntity(t *testing.T) {
 
 // TestAvailabilityEntityReportsCorrectStatus verifies availability entities report correct status
 func TestAvailabilityEntityReportsCorrectStatus(t *testing.T) {
-	// Test when API is available
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/config":
@@ -123,15 +117,13 @@ func TestAvailabilityEntityReportsCorrectStatus(t *testing.T) {
 	defer os.Unsetenv("FRIGATE_URL")
 	defer os.Unsetenv("FRIGATE_GO2RTC_URL")
 
-	p.OnInitialize(runner.Config{}, types.Storage{})
+	testInit(p)
 
-	// Get camera entities
-	cameraEntities, err := p.OnEntityDiscover("frigate-device-cam1", nil)
+	cameraEntities, err := p.entitiesForDevice("frigate-device-cam1")
 	if err != nil {
-		t.Fatalf("OnEntityDiscover failed: %v", err)
+		t.Fatalf("entitiesForDevice failed: %v", err)
 	}
 
-	// Check availability entity reports online status
 	for _, ent := range cameraEntities {
 		if strings.HasSuffix(ent.ID, "-availability") && ent.Domain == "binary_sensor" {
 			var state map[string]interface{}
@@ -149,7 +141,6 @@ func TestAvailabilityEntityReportsCorrectStatus(t *testing.T) {
 
 // TestAvailabilityEntityOnApiFailure verifies availability shows offline when API fails
 func TestAvailabilityEntityOnApiFailure(t *testing.T) {
-	// Test when API is unavailable
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		fmt.Fprintln(w, `{"error":"service unavailable"}`)
@@ -163,12 +154,12 @@ func TestAvailabilityEntityOnApiFailure(t *testing.T) {
 	defer os.Unsetenv("FRIGATE_URL")
 	defer os.Unsetenv("FRIGATE_GO2RTC_URL")
 
-	p.OnInitialize(runner.Config{}, types.Storage{})
+	testInit(p)
 
 	// Try to get camera entities - discovery will fail
-	cameraEntities, err := p.OnEntityDiscover("frigate-device-cam1", nil)
+	cameraEntities, err := p.entitiesForDevice("frigate-device-cam1")
 	if err != nil {
-		t.Fatalf("OnEntityDiscover failed: %v", err)
+		t.Fatalf("entitiesForDevice failed: %v", err)
 	}
 
 	// If availability entity exists, it should report unavailable

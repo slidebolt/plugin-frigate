@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	runner "github.com/slidebolt/sdk-runner"
 	"github.com/slidebolt/sdk-types"
 )
 
@@ -89,16 +88,14 @@ func TestFrigateErrorStatusMapping(t *testing.T) {
 			defer os.Unsetenv("FRIGATE_URL")
 			defer os.Unsetenv("FRIGATE_GO2RTC_URL")
 
-			p.OnInitialize(runner.Config{}, types.Storage{})
+			testInit(p)
 
-			// Get entities for the camera
 			deviceID := "frigate-device-cam1"
-			entities, err := p.OnEntityDiscover(deviceID, nil)
+			entities, err := p.entitiesForDevice(deviceID)
 			if err != nil {
-				t.Fatalf("OnEntityDiscover failed: %v", err)
+				t.Fatalf("entitiesForDevice failed: %v", err)
 			}
 
-			// Check that at least one entity has the correct sync status
 			foundSyncStatus := false
 			for _, ent := range entities {
 				if strings.HasPrefix(ent.ID, "frigate-stream-") || strings.HasPrefix(ent.ID, "frigate-image-") {
@@ -115,8 +112,6 @@ func TestFrigateErrorStatusMapping(t *testing.T) {
 				}
 			}
 
-			// For successful case, we should have entities with sync_status
-			// For error cases, we may not have camera entities
 			if tt.configStatus == http.StatusOK && !foundSyncStatus {
 				t.Error("expected to find entity with sync_status in successful case")
 			}
@@ -149,21 +144,19 @@ func TestSyncStatusFieldStandardValues(t *testing.T) {
 	defer os.Unsetenv("FRIGATE_URL")
 	defer os.Unsetenv("FRIGATE_GO2RTC_URL")
 
-	p.OnInitialize(runner.Config{}, types.Storage{})
+	testInit(p)
 
-	// Get entities for the camera
 	deviceID := "frigate-device-cam1"
-	entities, err := p.OnEntityDiscover(deviceID, nil)
+	entities, err := p.entitiesForDevice(deviceID)
 	if err != nil {
-		t.Fatalf("OnEntityDiscover failed: %v", err)
+		t.Fatalf("entitiesForDevice failed: %v", err)
 	}
 
-	// Valid sync status values according to SDK standard
 	validStatuses := map[string]bool{
 		"synced":  true,
 		"pending": true,
 		"failed":  true,
-		"":        true, // empty string for unknown/initial state
+		"":        true,
 	}
 
 	invalidStatuses := map[string]bool{
@@ -193,7 +186,6 @@ func TestSyncStatusFieldStandardValues(t *testing.T) {
 func TestSyncStatusOnCommand(t *testing.T) {
 	p := NewPlugin()
 
-	// Create a config entity
 	entity := types.Entity{
 		ID:       "frigate-config",
 		DeviceID: "frigate-system",
@@ -203,7 +195,6 @@ func TestSyncStatusOnCommand(t *testing.T) {
 		},
 	}
 
-	// Send a command to update config
 	payload, _ := json.Marshal(map[string]interface{}{
 		"frigate_url": "http://test.frigate.local",
 		"go2rtc_url":  "http://test.go2rtc.local",
@@ -212,19 +203,13 @@ func TestSyncStatusOnCommand(t *testing.T) {
 		Payload: payload,
 	}
 
-	result, err := p.OnCommand(cmd, entity)
+	err := p.runCommand(cmd, entity)
 	if err != nil {
 		t.Fatalf("OnCommand failed: %v", err)
 	}
-
-	// Verify sync_status is set in the result
-	var state map[string]interface{}
-	if err := json.Unmarshal(result.Data.Reported, &state); err == nil {
-		if status, ok := state["sync_status"].(string); ok {
-			if status != "synced" && status != "" {
-				t.Errorf("expected sync_status to be 'synced' or empty after successful command, got %q", status)
-			}
-		}
+	// Config was updated; pConfig reflects the new URLs.
+	if p.pConfig.FrigateURL != "http://test.frigate.local" {
+		t.Errorf("expected FrigateURL to be updated, got %q", p.pConfig.FrigateURL)
 	}
 }
 
@@ -253,16 +238,14 @@ func TestSyncStatusNotInSync(t *testing.T) {
 	defer os.Unsetenv("FRIGATE_URL")
 	defer os.Unsetenv("FRIGATE_GO2RTC_URL")
 
-	p.OnInitialize(runner.Config{}, types.Storage{})
+	testInit(p)
 
-	// Get entities for the camera
 	deviceID := "frigate-device-cam1"
-	entities, err := p.OnEntityDiscover(deviceID, nil)
+	entities, err := p.entitiesForDevice(deviceID)
 	if err != nil {
-		t.Fatalf("OnEntityDiscover failed: %v", err)
+		t.Fatalf("entitiesForDevice failed: %v", err)
 	}
 
-	// Ensure no entity uses "in_sync"
 	for _, ent := range entities {
 		if len(ent.Data.Reported) > 0 {
 			var state map[string]interface{}

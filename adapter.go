@@ -7,7 +7,6 @@ import (
 	"log"
 	"net/url"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,10 +52,13 @@ type PluginConfig struct {
 }
 
 type PluginFrigatePlugin struct {
-	mu      sync.RWMutex
-	client  frigate.Client
-	config  runner.Config
-	pConfig PluginConfig
+	mu        sync.RWMutex
+	client    frigate.Client
+	pluginCtx runner.PluginContext
+	pConfig   PluginConfig
+
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	mqttMu    sync.RWMutex
 	mqttState map[string]map[string]string
@@ -169,14 +171,16 @@ func pluginDomains() []types.DomainDescriptor {
 	}
 }
 
-func (p *PluginFrigatePlugin) OnInitialize(config runner.Config, state types.Storage) (types.Manifest, types.Storage) {
-	p.config = config
-	if len(state.Data) > 0 {
-		var stored struct {
-			Config PluginConfig `json:"config"`
-		}
-		if err := json.Unmarshal(state.Data, &stored); err == nil {
-			p.pConfig = stored.Config
+func (p *PluginFrigatePlugin) Initialize(ctx runner.PluginContext) (types.Manifest, error) {
+	p.pluginCtx = ctx
+	if ctx.Registry != nil {
+		if stored, ok := ctx.Registry.LoadState(); ok && len(stored.Data) > 0 {
+			var s struct {
+				Config PluginConfig `json:"config"`
+			}
+			if err := json.Unmarshal(stored.Data, &s); err == nil {
+				p.pConfig = s.Config
+			}
 		}
 	}
 
@@ -229,14 +233,53 @@ func (p *PluginFrigatePlugin) OnInitialize(config runner.Config, state types.Sto
 		Name:    "Frigate Video",
 		Version: "1.1.0",
 		Schemas: schemas,
-	}, state
+	}, nil
 }
 
-func (p *PluginFrigatePlugin) OnReady() {
-	if p.client == nil {
-		log.Println("Frigate Plugin: FRIGATE_URL not set, discovery disabled")
-		return
+func (p *PluginFrigatePlugin) Start(ctx context.Context) error {
+	p.ctx, p.cancel = context.WithCancel(context.Background())
+
+	// Register the core management device and entities.
+	if p.pluginCtx.Registry != nil {
+		coreID := types.CoreDeviceID("plugin-frigate")
+		_ = p.pluginCtx.Registry.SaveDevice(types.Device{
+			ID:         coreID,
+			SourceID:   coreID,
+			SourceName: "Frigate Plugin",
+		})
+		for _, need := range types.CoreEntities("plugin-frigate") {
+			_ = p.pluginCtx.Registry.SaveEntity(need)
+		}
+
+		// System device that holds availability and config entities.
+		existing, _ := p.pluginCtx.Registry.LoadDevice("frigate-system")
+		_ = p.pluginCtx.Registry.SaveDevice(reconcileDevice(existing, types.Device{
+			ID:         "frigate-system",
+			SourceID:   "system",
+			SourceName: "Frigate System",
+		}))
+		_ = p.pluginCtx.Registry.SaveEntity(types.Entity{
+			ID:        "frigate-config",
+			DeviceID:  "frigate-system",
+			Domain:    "config",
+			LocalName: "Frigate Config",
+		})
+		// Availability reflects whether Frigate is reachable.
+		avail := p.client != nil
+		systemEnt := types.Entity{
+			ID:        "availability",
+			DeviceID:  "frigate-system",
+			Domain:    "binary_sensor",
+			LocalName: "Frigate Availability",
+		}
+		setReported(&systemEnt, availabilityState{
+			Type:       "state_changed",
+			Available:  avail,
+			SyncStatus: types.SyncStatusSynced,
+		})
+		_ = p.pluginCtx.Registry.SaveEntity(systemEnt)
 	}
+
 	if strings.TrimSpace(p.pConfig.MQTTHost) != "" {
 		rt, err := frigate.StartMQTT(frigate.MQTTConfig{
 			Host:        p.pConfig.MQTTHost,
@@ -255,13 +298,25 @@ func (p *PluginFrigatePlugin) OnReady() {
 			p.mqttMu.Unlock()
 		}
 	}
-}
 
-func (p *PluginFrigatePlugin) WaitReady(ctx context.Context) error {
+	if p.client == nil {
+		log.Println("Frigate Plugin: FRIGATE_URL not set, discovery disabled")
+		return nil
+	}
+
+	// Initial discovery in background so Start returns quickly.
+	go p.syncCameras(p.ctx)
+
+	// Periodic refresh loop.
+	go p.refreshLoop(p.ctx)
+
 	return nil
 }
 
-func (p *PluginFrigatePlugin) OnShutdown() {
+func (p *PluginFrigatePlugin) Stop() error {
+	if p.cancel != nil {
+		p.cancel()
+	}
 	p.mqttMu.Lock()
 	rt := p.mqtt
 	p.mqtt = nil
@@ -269,6 +324,255 @@ func (p *PluginFrigatePlugin) OnShutdown() {
 	if rt != nil {
 		rt.Stop()
 	}
+	return nil
+}
+
+func (p *PluginFrigatePlugin) OnReset() error {
+	if p.pluginCtx.Registry == nil {
+		return nil
+	}
+	for _, dev := range p.pluginCtx.Registry.LoadDevices() {
+		_ = p.pluginCtx.Registry.DeleteDevice(dev.ID)
+	}
+	return p.pluginCtx.Registry.DeleteState()
+}
+
+// syncCameras queries Frigate once and saves all cameras/entities to the registry.
+func (p *PluginFrigatePlugin) syncCameras(ctx context.Context) {
+	cameras, err := p.discover()
+	if err != nil {
+		log.Printf("Frigate Plugin: discovery failed: %v", err)
+		return
+	}
+	p.saveCamerasToRegistry(cameras)
+}
+
+// refreshLoop periodically re-discovers cameras and updates the registry.
+func (p *PluginFrigatePlugin) refreshLoop(ctx context.Context) {
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cameras, err := p.discover()
+			if err != nil {
+				log.Printf("Frigate Plugin: refresh failed: %v", err)
+				continue
+			}
+			p.saveCamerasToRegistry(cameras)
+		}
+	}
+}
+
+// saveCamerasToRegistry writes all discovered cameras and their entities to the registry.
+func (p *PluginFrigatePlugin) saveCamerasToRegistry(cameras []*discoveredCamera) {
+	if p.pluginCtx.Registry == nil {
+		return
+	}
+
+	// Update system availability to reflect Frigate is reachable.
+	systemEnt := types.Entity{
+		ID:        "availability",
+		DeviceID:  "frigate-system",
+		Domain:    "binary_sensor",
+		LocalName: "Frigate Availability",
+	}
+	setReported(&systemEnt, availabilityState{
+		Type:       "state_changed",
+		Available:  true,
+		SyncStatus: types.SyncStatusSynced,
+	})
+	_ = p.pluginCtx.Registry.SaveEntity(systemEnt)
+
+	for _, cam := range cameras {
+		deviceID := p.deviceID(cam.Name)
+
+		existing, _ := p.pluginCtx.Registry.LoadDevice(deviceID)
+		_ = p.pluginCtx.Registry.SaveDevice(reconcileDevice(existing, types.Device{
+			ID:         deviceID,
+			SourceID:   cam.Name,
+			SourceName: cam.Name,
+		}))
+
+		// Availability entity for this camera.
+		avEnt := types.Entity{
+			ID:        "availability",
+			DeviceID:  deviceID,
+			Domain:    "binary_sensor",
+			LocalName: cam.Name + " Availability",
+		}
+		setReported(&avEnt, availabilityState{
+			Type:       "state_changed",
+			Available:  cam.Online,
+			SyncStatus: types.SyncStatusSynced,
+		})
+		_ = p.pluginCtx.Registry.SaveEntity(avEnt)
+
+		// Stream entities.
+		for _, spec := range p.streamSpecs(cam.Name, cam.Online) {
+			ent := types.Entity{
+				ID:        p.streamEntityID(cam.Name, spec.Suffix),
+				DeviceID:  deviceID,
+				Domain:    domainStream,
+				LocalName: spec.Local,
+			}
+			setReported(&ent, streamState{
+				Type:       "state_changed",
+				URL:        p.go2rtcURLf(spec.Path, cam.Name),
+				Format:     spec.Format,
+				Kind:       spec.Kind,
+				Online:     spec.IsOnline,
+				SyncStatus: types.SyncStatusSynced,
+			})
+			_ = p.pluginCtx.Registry.SaveEntity(ent)
+		}
+
+		// Frame image entity.
+		img := types.Entity{
+			ID:        p.imageEntityID(cam.Name, "frame-jpeg"),
+			DeviceID:  deviceID,
+			Domain:    domainImage,
+			LocalName: "Frame JPEG",
+		}
+		setReported(&img, imageState{
+			Type:       "state_changed",
+			URL:        p.go2rtcURLf("/api/frame.jpeg?src=%s", cam.Name),
+			Format:     "jpeg",
+			Online:     cam.Online,
+			SyncStatus: types.SyncStatusSynced,
+		})
+		_ = p.pluginCtx.Registry.SaveEntity(img)
+
+		// Event sensor entities.
+		for _, label := range []string{"person", "car"} {
+			localLabel := strings.ToUpper(label[:1]) + label[1:]
+			ent := types.Entity{
+				ID:        p.sensorEntityID(cam.Name, label),
+				DeviceID:  deviceID,
+				Domain:    domainFrigateEvent,
+				LocalName: localLabel + " Events",
+			}
+			setReported(&ent, p.frigateEventState(cam, label))
+			_ = p.pluginCtx.Registry.SaveEntity(ent)
+		}
+
+		// HA sensor entities.
+		haEntities := make(map[string]types.Entity)
+		p.addHAEntitiesForCamera(haEntities, cam, deviceID)
+		for _, ent := range haEntities {
+			_ = p.pluginCtx.Registry.SaveEntity(ent)
+		}
+
+		// Emit stream event for the main stream.
+		p.emitMainStreamEvent(cam)
+	}
+}
+
+// discoverDevices returns the current list of devices: the system device, the
+// core plugin device, and one device per enabled Frigate camera. If the Frigate
+// API is unreachable the base devices are still returned.
+func (p *PluginFrigatePlugin) discoverDevices() ([]types.Device, error) {
+	coreID := types.CoreDeviceID("plugin-frigate")
+	byID := map[string]types.Device{
+		coreID: {ID: coreID, SourceID: coreID, SourceName: "Frigate Plugin"},
+		"frigate-system": {ID: "frigate-system", SourceID: "system", SourceName: "Frigate System"},
+	}
+
+	cameras, err := p.discover()
+	if err == nil {
+		for _, cam := range cameras {
+			id := p.deviceID(cam.Name)
+			byID[id] = types.Device{ID: id, SourceID: cam.Name, SourceName: cam.Name}
+		}
+	}
+
+	out := make([]types.Device, 0, len(byID))
+	for _, dev := range byID {
+		out = append(out, dev)
+	}
+	return out, nil
+}
+
+// entitiesForDevice returns all entities for the given device ID by running a
+// live Frigate discovery. It mirrors what saveCamerasToRegistry writes to the
+// registry but returns the slice directly — useful for unit tests.
+func (p *PluginFrigatePlugin) entitiesForDevice(deviceID string) ([]types.Entity, error) {
+	byID := make(map[string]types.Entity)
+
+	if deviceID == "frigate-system" {
+		byID["frigate-config"] = types.Entity{
+			ID: "frigate-config", DeviceID: deviceID,
+			Domain: "config", LocalName: "Frigate Config",
+		}
+	}
+
+	cameras, err := p.discover()
+	if err != nil {
+		if deviceID == "frigate-system" {
+			avEnt := types.Entity{ID: "availability", DeviceID: deviceID, Domain: "binary_sensor", LocalName: "Frigate Availability"}
+			setReported(&avEnt, availabilityState{Type: "state_changed", Available: false, SyncStatus: types.SyncStatusSynced})
+			byID["availability"] = avEnt
+		}
+	} else {
+		if deviceID == "frigate-system" {
+			avEnt := types.Entity{ID: "availability", DeviceID: deviceID, Domain: "binary_sensor", LocalName: "Frigate Availability"}
+			setReported(&avEnt, availabilityState{Type: "state_changed", Available: true, SyncStatus: types.SyncStatusSynced})
+			byID["availability"] = avEnt
+		}
+		for _, cam := range cameras {
+			if p.deviceID(cam.Name) != deviceID {
+				continue
+			}
+			avEnt := types.Entity{ID: "availability", DeviceID: deviceID, Domain: "binary_sensor", LocalName: cam.Name + " Availability"}
+			setReported(&avEnt, availabilityState{Type: "state_changed", Available: cam.Online, SyncStatus: types.SyncStatusSynced})
+			byID["availability"] = avEnt
+
+			for _, spec := range p.streamSpecs(cam.Name, cam.Online) {
+				ent := types.Entity{ID: p.streamEntityID(cam.Name, spec.Suffix), DeviceID: deviceID, Domain: domainStream, LocalName: spec.Local}
+				setReported(&ent, streamState{Type: "state_changed", URL: p.go2rtcURLf(spec.Path, cam.Name), Format: spec.Format, Kind: spec.Kind, Online: spec.IsOnline, SyncStatus: types.SyncStatusSynced})
+				byID[ent.ID] = ent
+			}
+
+			img := types.Entity{ID: p.imageEntityID(cam.Name, "frame-jpeg"), DeviceID: deviceID, Domain: domainImage, LocalName: "Frame JPEG"}
+			setReported(&img, imageState{Type: "state_changed", URL: p.go2rtcURLf("/api/frame.jpeg?src=%s", cam.Name), Format: "jpeg", Online: cam.Online, SyncStatus: types.SyncStatusSynced})
+			byID[img.ID] = img
+
+			for _, label := range []string{"person", "car"} {
+				localLabel := strings.ToUpper(label[:1]) + label[1:]
+				ent := types.Entity{ID: p.sensorEntityID(cam.Name, label), DeviceID: deviceID, Domain: domainFrigateEvent, LocalName: localLabel + " Events"}
+				setReported(&ent, p.frigateEventState(cam, label))
+				byID[ent.ID] = ent
+			}
+
+			p.addHAEntitiesForCamera(byID, cam, deviceID)
+		}
+	}
+
+	for _, need := range types.CoreEntities("plugin-frigate") {
+		if need.DeviceID == deviceID {
+			if _, exists := byID[need.ID]; !exists {
+				byID[need.ID] = need
+			}
+		}
+	}
+
+	out := make([]types.Entity, 0, len(byID))
+	for _, ent := range byID {
+		out = append(out, ent)
+	}
+	return out, nil
+}
+
+// reconcileDevice merges incoming discovery data into the existing device,
+// preserving user-set fields (LocalName) per the sdk-types contract.
+func reconcileDevice(existing, incoming types.Device) types.Device {
+	result := incoming
+	if existing.LocalName != "" {
+		result.LocalName = existing.LocalName
+	}
+	return result
 }
 
 func newestEventsByCameraLabel(events []frigate.FrigateEvent) map[string]map[string]frigate.FrigateEvent {
@@ -290,7 +594,7 @@ func newestEventsByCameraLabel(events []frigate.FrigateEvent) map[string]map[str
 	return byCamera
 }
 
-// discover queries Frigate and returns camera data - stateless, no storage
+// discover queries Frigate and returns camera data — stateless, no storage.
 func (p *PluginFrigatePlugin) discover() ([]*discoveredCamera, error) {
 	p.mu.RLock()
 	client := p.client
@@ -376,7 +680,7 @@ func (p *PluginFrigatePlugin) mqttValue(camera, key string) (string, bool) {
 }
 
 func (p *PluginFrigatePlugin) emitMainStreamEvent(cam *discoveredCamera) {
-	if p.config.EventSink == nil {
+	if p.pluginCtx.Events == nil {
 		return
 	}
 	state := streamState{
@@ -387,7 +691,7 @@ func (p *PluginFrigatePlugin) emitMainStreamEvent(cam *discoveredCamera) {
 		Online: cam.Online,
 	}
 	payload, _ := json.Marshal(state)
-	_ = p.config.EventSink.EmitEvent(types.InboundEvent{
+	_ = p.pluginCtx.Events.PublishEvent(types.InboundEvent{
 		DeviceID: p.deviceID(cam.Name),
 		EntityID: p.streamEntityID(cam.Name, "main"),
 		Payload:  payload,
@@ -395,12 +699,12 @@ func (p *PluginFrigatePlugin) emitMainStreamEvent(cam *discoveredCamera) {
 }
 
 func (p *PluginFrigatePlugin) emitFrigateEventSensor(cam *discoveredCamera, label string) {
-	if p.config.EventSink == nil {
+	if p.pluginCtx.Events == nil {
 		return
 	}
 	state := p.frigateEventState(cam, label)
 	payload, _ := json.Marshal(state)
-	_ = p.config.EventSink.EmitEvent(types.InboundEvent{
+	_ = p.pluginCtx.Events.PublishEvent(types.InboundEvent{
 		DeviceID: p.deviceID(cam.Name),
 		EntityID: p.sensorEntityID(cam.Name, label),
 		Payload:  payload,
@@ -574,113 +878,6 @@ func (p *PluginFrigatePlugin) go2rtcURLf(pathFmt, camera string) string {
 	return base + fmt.Sprintf(pathFmt, src)
 }
 
-func (p *PluginFrigatePlugin) OnHealthCheck() (string, error) {
-	p.mu.RLock()
-	client := p.client
-	p.mu.RUnlock()
-	if client == nil {
-		return "", fmt.Errorf("FRIGATE_URL not configured")
-	}
-	return "perfect", nil
-}
-
-func (p *PluginFrigatePlugin) OnConfigUpdate(current types.Storage) (types.Storage, error) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	data := struct {
-		Config PluginConfig `json:"config"`
-	}{
-		Config: p.pConfig,
-	}
-	encoded, _ := json.Marshal(data)
-	current.Data = encoded
-	return current, nil
-}
-
-func (p *PluginFrigatePlugin) OnDeviceCreate(dev types.Device) (types.Device, error) {
-	return dev, nil
-}
-
-func (p *PluginFrigatePlugin) OnDeviceUpdate(dev types.Device) (types.Device, error) {
-	return dev, nil
-}
-
-func (p *PluginFrigatePlugin) OnDeviceDelete(id string) error {
-	return nil
-}
-
-func (p *PluginFrigatePlugin) OnDeviceDiscover(current []types.Device) ([]types.Device, error) {
-	p.mu.RLock()
-	client := p.client
-	p.mu.RUnlock()
-
-	byID := make(map[string]types.Device)
-	for _, dev := range current {
-		byID[dev.ID] = dev
-	}
-
-	byID["frigate-system"] = types.Device{
-		ID:         "frigate-system",
-		SourceID:   "system",
-		SourceName: "Frigate System",
-	}
-
-	coreID := types.CoreDeviceID("plugin-frigate")
-	byID[coreID] = runner.ReconcileDevice(byID[coreID], types.Device{
-		ID:         coreID,
-		SourceID:   coreID,
-		SourceName: "Frigate Plugin",
-	})
-
-	// Lazy discovery: fetch cameras fresh each time
-	if client != nil {
-		cameras, err := p.discover()
-		if err != nil {
-			// Log the error but don't fail the entire list - return what we have
-			// The error will be visible in the plugin health entity
-			log.Printf("Frigate Plugin: discovery failed: %v", err)
-		} else {
-			for _, cam := range cameras {
-				id := p.deviceID(cam.Name)
-				discoveredDev := types.Device{
-					ID:         id,
-					SourceID:   cam.Name,
-					SourceName: cam.Name,
-				}
-				if existing, ok := byID[id]; ok {
-					byID[id] = runner.ReconcileDevice(existing, discoveredDev)
-				} else {
-					byID[id] = runner.ReconcileDevice(types.Device{}, discoveredDev)
-				}
-			}
-		}
-	}
-
-	out := make([]types.Device, 0, len(byID))
-	for _, dev := range byID {
-		out = append(out, dev)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out, nil
-}
-
-func (p *PluginFrigatePlugin) OnDeviceSearch(q types.SearchQuery, res []types.Device) ([]types.Device, error) {
-	return res, nil
-}
-
-func (p *PluginFrigatePlugin) OnEntityCreate(e types.Entity) (types.Entity, error) {
-	return e, nil
-}
-
-func (p *PluginFrigatePlugin) OnEntityUpdate(e types.Entity) (types.Entity, error) {
-	return e, nil
-}
-
-func (p *PluginFrigatePlugin) OnEntityDelete(d, e string) error {
-	return nil
-}
-
 func (p *PluginFrigatePlugin) addHASensor(byID map[string]types.Entity, deviceID, entID, name string, payload frigateHASensorState) {
 	ent := types.Entity{
 		ID:        entID,
@@ -688,34 +885,10 @@ func (p *PluginFrigatePlugin) addHASensor(byID map[string]types.Entity, deviceID
 		Domain:    domainFrigateHA,
 		LocalName: name,
 	}
-	// Set standardized sync status for all HA sensors
 	payload.SyncStatus = types.SyncStatusSynced
 	payload.Type = "state_changed"
 	setReported(&ent, payload)
 	byID[ent.ID] = ent
-}
-
-// addAvailabilityEntity creates a binary_sensor.availability entity
-func (p *PluginFrigatePlugin) addAvailabilityEntity(byID map[string]types.Entity, deviceID, entID, name string, available bool) {
-	ent := types.Entity{
-		ID:        entID,
-		DeviceID:  deviceID,
-		Domain:    "binary_sensor",
-		LocalName: name,
-	}
-	setReported(&ent, availabilityState{
-		Type:       "state_changed",
-		Available:  available,
-		SyncStatus: types.SyncStatusSynced,
-	})
-	byID[ent.ID] = ent
-}
-
-func tsFor(evt *frigate.FrigateEvent) string {
-	if evt == nil || evt.StartTime <= 0 {
-		return "Unavailable"
-	}
-	return time.Unix(int64(evt.StartTime), 0).UTC().Format(time.RFC3339)
 }
 
 func (p *PluginFrigatePlugin) addHAEntitiesForCamera(byID map[string]types.Entity, cam *discoveredCamera, deviceID string) {
@@ -844,160 +1017,65 @@ func getMQTTOrDefault(p *PluginFrigatePlugin, camera, key, fallback string) stri
 	return fallback
 }
 
-func (p *PluginFrigatePlugin) OnEntityDiscover(deviceID string, current []types.Entity) ([]types.Entity, error) {
-	byID := make(map[string]types.Entity)
-	for _, ent := range current {
-		byID[ent.ID] = ent
+func tsFor(evt *frigate.FrigateEvent) string {
+	if evt == nil || evt.StartTime <= 0 {
+		return "Unavailable"
 	}
-
-	if deviceID == "frigate-system" {
-		byID["frigate-config"] = types.Entity{
-			ID:        "frigate-config",
-			DeviceID:  "frigate-system",
-			Domain:    "config",
-			LocalName: "Frigate Config",
-		}
-	}
-
-	// Lazy discovery: fetch cameras fresh each time
-	p.mu.RLock()
-	client := p.client
-	p.mu.RUnlock()
-
-	// Always add availability entity for frigate-system device
-	// It reflects whether the Frigate API is configured and reachable
-	if deviceID == "frigate-system" {
-		if client == nil {
-			// No client configured - unavailable
-			p.addAvailabilityEntity(byID, deviceID, "availability", "Frigate Availability", false)
-		}
-	}
-
-	if client != nil {
-		cameras, err := p.discover()
-		if err != nil {
-			// Log the error but don't fail the entire list - return what we have
-			log.Printf("Frigate Plugin: discovery failed: %v", err)
-
-			// Add availability entity for system device showing API is unavailable
-			if deviceID == "frigate-system" {
-				p.addAvailabilityEntity(byID, deviceID, "availability", "Frigate Availability", false)
-			}
-		} else {
-			// Add availability entity for system device showing API is available
-			if deviceID == "frigate-system" {
-				p.addAvailabilityEntity(byID, deviceID, "availability", "Frigate Availability", true)
-			}
-
-			for _, cam := range cameras {
-				if p.deviceID(cam.Name) != deviceID {
-					continue
-				}
-
-				// Add availability entity for camera
-				p.addAvailabilityEntity(byID, deviceID, "availability", cam.Name+" Availability", cam.Online)
-
-				for _, spec := range p.streamSpecs(cam.Name, cam.Online) {
-					ent := types.Entity{
-						ID:        p.streamEntityID(cam.Name, spec.Suffix),
-						DeviceID:  deviceID,
-						Domain:    domainStream,
-						LocalName: spec.Local,
-					}
-					setReported(&ent, streamState{
-						Type:       "state_changed",
-						URL:        p.go2rtcURLf(spec.Path, cam.Name),
-						Format:     spec.Format,
-						Kind:       spec.Kind,
-						Online:     spec.IsOnline,
-						SyncStatus: types.SyncStatusSynced,
-					})
-					byID[ent.ID] = ent
-				}
-
-				img := types.Entity{
-					ID:        p.imageEntityID(cam.Name, "frame-jpeg"),
-					DeviceID:  deviceID,
-					Domain:    domainImage,
-					LocalName: "Frame JPEG",
-				}
-				setReported(&img, imageState{
-					Type:       "state_changed",
-					URL:        p.go2rtcURLf("/api/frame.jpeg?src=%s", cam.Name),
-					Format:     "jpeg",
-					Online:     cam.Online,
-					SyncStatus: types.SyncStatusSynced,
-				})
-				byID[img.ID] = img
-
-				for _, label := range []string{"person", "car"} {
-					localLabel := strings.ToUpper(label[:1]) + label[1:]
-					ent := types.Entity{
-						ID:        p.sensorEntityID(cam.Name, label),
-						DeviceID:  deviceID,
-						Domain:    domainFrigateEvent,
-						LocalName: localLabel + " Events",
-					}
-					setReported(&ent, p.frigateEventState(cam, label))
-					byID[ent.ID] = ent
-				}
-
-				p.addHAEntitiesForCamera(byID, cam, deviceID)
-			}
-		}
-	}
-
-	for _, need := range types.CoreEntities("plugin-frigate") {
-		if deviceID == need.DeviceID {
-			if _, exists := byID[need.ID]; !exists {
-				byID[need.ID] = need
-			}
-		}
-	}
-
-	out := make([]types.Entity, 0, len(byID))
-	for _, ent := range byID {
-		out = append(out, ent)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out, nil
+	return time.Unix(int64(evt.StartTime), 0).UTC().Format(time.RFC3339)
 }
 
-func (p *PluginFrigatePlugin) OnCommand(req types.Command, entity types.Entity) (types.Entity, error) {
-	if entity.ID == "frigate-config" {
-		var params struct {
-			FrigateURL       string `json:"frigate_url"`
-			Go2RTCURL        string `json:"go2rtc_url"`
-			FrigatePublicURL string `json:"frigate_public_url"`
-			Go2RTCPublicURL  string `json:"go2rtc_public_url"`
-		}
-		raw, err := json.Marshal(req.Payload)
-		if err != nil {
-			return entity, err
-		}
-		if err := json.Unmarshal(raw, &params); err == nil {
-			p.mu.Lock()
-			if params.FrigateURL != "" {
-				p.pConfig.FrigateURL = params.FrigateURL
-			}
-			if params.Go2RTCURL != "" {
-				p.pConfig.Go2RTCURL = params.Go2RTCURL
-			}
-			if params.FrigatePublicURL != "" {
-				p.pConfig.FrigatePublicURL = params.FrigatePublicURL
-			}
-			if params.Go2RTCPublicURL != "" {
-				p.pConfig.Go2RTCPublicURL = params.Go2RTCPublicURL
-			}
-			if p.pConfig.FrigateURL != "" {
-				p.client = frigate.NewClient(p.pConfig.FrigateURL, p.pConfig.Go2RTCURL)
-			}
-			p.mu.Unlock()
-			// Discovery now happens lazily in OnDeviceDiscover/OnEntityDiscover
-		}
-		return entity, nil
+func (p *PluginFrigatePlugin) runCommand(req types.Command, entity types.Entity) error {
+	if entity.ID != "frigate-config" {
+		return nil
 	}
-	return entity, nil
+	var params struct {
+		FrigateURL       string `json:"frigate_url"`
+		Go2RTCURL        string `json:"go2rtc_url"`
+		FrigatePublicURL string `json:"frigate_public_url"`
+		Go2RTCPublicURL  string `json:"go2rtc_public_url"`
+	}
+	raw, err := json.Marshal(req.Payload)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	if params.FrigateURL != "" {
+		p.pConfig.FrigateURL = params.FrigateURL
+	}
+	if params.Go2RTCURL != "" {
+		p.pConfig.Go2RTCURL = params.Go2RTCURL
+	}
+	if params.FrigatePublicURL != "" {
+		p.pConfig.FrigatePublicURL = params.FrigatePublicURL
+	}
+	if params.Go2RTCPublicURL != "" {
+		p.pConfig.Go2RTCPublicURL = params.Go2RTCPublicURL
+	}
+	if p.pConfig.FrigateURL != "" {
+		p.client = frigate.NewClient(p.pConfig.FrigateURL, p.pConfig.Go2RTCURL)
+	}
+	if p.pluginCtx.Registry != nil {
+		data := struct {
+			Config PluginConfig `json:"config"`
+		}{Config: p.pConfig}
+		if encoded, mErr := json.Marshal(data); mErr == nil {
+			_ = p.pluginCtx.Registry.SaveState(types.Storage{Data: encoded})
+		}
+	}
+	p.mu.Unlock()
+
+	// Kick off a fresh discovery now that the URL has changed.
+	if p.ctx != nil {
+		go p.syncCameras(p.ctx)
+	}
+	return nil
+}
+
+func (p *PluginFrigatePlugin) OnCommand(req types.Command, entity types.Entity) error {
+	return p.runCommand(req, entity)
 }
 
 func firstEnv(keys ...string) string {
@@ -1007,15 +1085,4 @@ func firstEnv(keys ...string) string {
 		}
 	}
 	return ""
-}
-
-func (p *PluginFrigatePlugin) OnEvent(evt types.Event, entity types.Entity) (types.Entity, error) {
-	raw, err := json.Marshal(evt.Payload)
-	if err != nil {
-		return entity, err
-	}
-	entity.Data.Reported = raw
-	entity.Data.Effective = raw
-	entity.Data.UpdatedAt = time.Now()
-	return entity, nil
 }

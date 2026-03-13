@@ -12,8 +12,6 @@ import (
 	"time"
 
 	"github.com/slidebolt/plugin-frigate/pkg/frigate"
-	runner "github.com/slidebolt/sdk-runner"
-	"github.com/slidebolt/sdk-types"
 )
 
 // TestNilClientDiscovery exposes weakness: nil client causes panic or unexpected behavior
@@ -21,7 +19,7 @@ func TestNilClientDiscovery(t *testing.T) {
 	p := NewPlugin()
 
 	// Initialize without setting FRIGATE_URL - client will be nil
-	p.OnInitialize(runner.Config{}, types.Storage{})
+	testInit(p)
 
 	// This should handle nil client gracefully, not panic
 	_, err := p.discover()
@@ -38,10 +36,9 @@ func TestNilClientDiscovery(t *testing.T) {
 // TestMQTTStateMemoryLeak exposes weakness: unbounded MQTT state growth
 func TestMQTTStateMemoryLeak(t *testing.T) {
 	p := NewPlugin()
-	p.OnInitialize(runner.Config{}, types.Storage{})
+	testInit(p)
 
 	// Simulate many cameras sending many MQTT updates
-	// In production, this could cause memory exhaustion
 	for i := 0; i < 10000; i++ {
 		cameraName := fmt.Sprintf("camera_%d", i)
 		for j := 0; j < 100; j++ {
@@ -58,7 +55,6 @@ func TestMQTTStateMemoryLeak(t *testing.T) {
 		t.Fatal("expected non-empty MQTT value")
 	}
 
-	// In production, there should be cleanup logic for stale cameras
 	t.Log("WARNING: MQTT state grows unbounded - potential memory leak with many cameras/updates")
 }
 
@@ -79,16 +75,14 @@ func TestInvalidCameraNames(t *testing.T) {
 	}
 
 	p := NewPlugin()
-	p.OnInitialize(runner.Config{}, types.Storage{})
+	testInit(p)
 
 	for _, name := range invalidNames {
 		deviceID := p.deviceID(name)
 		entityID := p.streamEntityID(name, "main")
 
-		// These should not panic and should produce valid entity IDs
 		t.Logf("Camera name: %q -> deviceID: %q, entityID: %q", name, deviceID, entityID)
 
-		// Check for potential issues
 		if strings.Contains(entityID, " ") {
 			t.Errorf("entity ID contains space for camera %q: %s", name, entityID)
 		}
@@ -132,12 +126,11 @@ func TestEmptyURLHandling(t *testing.T) {
 // TestTimestampOverflow exposes weakness: float64 timestamp overflow
 func TestTimestampOverflow(t *testing.T) {
 	p := NewPlugin()
-	p.OnInitialize(runner.Config{}, types.Storage{})
+	testInit(p)
 
-	// Test extreme timestamp values that could overflow int64
 	events := []frigate.FrigateEvent{
-		{ID: "evt1", Camera: "cam1", Label: "person", StartTime: 1e308, EndTime: 1e308},   // Max float64
-		{ID: "evt2", Camera: "cam1", Label: "person", StartTime: -1e308, EndTime: -1e308}, // Min float64
+		{ID: "evt1", Camera: "cam1", Label: "person", StartTime: 1e308, EndTime: 1e308},
+		{ID: "evt2", Camera: "cam1", Label: "person", StartTime: -1e308, EndTime: -1e308},
 		{ID: "evt3", Camera: "cam1", Label: "person", StartTime: 0, EndTime: 0},
 		{ID: "evt4", Camera: "cam1", Label: "person", StartTime: -1, EndTime: -1},
 	}
@@ -148,7 +141,6 @@ func TestTimestampOverflow(t *testing.T) {
 		AllEvents:  events,
 	}
 
-	// Build LastEvents map manually
 	for _, evt := range events {
 		if evt.Label != "" {
 			if existing, ok := cam.LastEvents[evt.Label]; !ok || evt.StartTime > existing.StartTime {
@@ -161,7 +153,6 @@ func TestTimestampOverflow(t *testing.T) {
 	state := p.frigateEventState(cam, "person")
 	t.Logf("Event state with extreme timestamps: %+v", state)
 
-	// Check timestamp conversion in tsFor function
 	for _, evt := range events {
 		result := tsFor(&evt)
 		t.Logf("StartTime=%v -> tsFor=%q", evt.StartTime, result)
@@ -171,11 +162,10 @@ func TestTimestampOverflow(t *testing.T) {
 // TestConcurrentAccess exposes race conditions in the plugin
 func TestConcurrentAccess(t *testing.T) {
 	p := NewPlugin()
-	p.OnInitialize(runner.Config{}, types.Storage{})
+	testInit(p)
 
 	var wg sync.WaitGroup
 
-	// Concurrent reads and writes to MQTT state
 	for i := 0; i < 100; i++ {
 		wg.Add(1)
 		go func(id int) {
@@ -185,7 +175,6 @@ func TestConcurrentAccess(t *testing.T) {
 		}(i)
 	}
 
-	// Concurrent reads
 	for i := 0; i < 100; i++ {
 		wg.Add(1)
 		go func(id int) {
@@ -195,7 +184,6 @@ func TestConcurrentAccess(t *testing.T) {
 		}(i)
 	}
 
-	// Test with timeout to detect deadlocks
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()
@@ -228,19 +216,17 @@ func TestEventSinkNilPointer(t *testing.T) {
 
 	p := NewPlugin()
 
-	// Initialize with nil EventSink
-	p.OnInitialize(runner.Config{EventSink: nil}, types.Storage{})
+	// Initialize with nil Events (default PluginContext has nil Events)
+	testInit(p)
 	_ = os.Setenv("FRIGATE_URL", ts.URL)
 	defer os.Unsetenv("FRIGATE_URL")
-	p.OnInitialize(runner.Config{EventSink: nil}, types.Storage{})
+	testInit(p)
 
-	// This should not panic with nil EventSink
+	// These emit events - should handle nil sink gracefully
 	cam := &discoveredCamera{
 		Name:   "cam1",
 		Online: true,
 	}
-
-	// These emit events - should handle nil sink gracefully
 	p.emitMainStreamEvent(cam)
 	p.emitFrigateEventSensor(cam, "person")
 }
@@ -249,7 +235,6 @@ func TestEventSinkNilPointer(t *testing.T) {
 func TestSanitizeCollisions(t *testing.T) {
 	p := NewPlugin()
 
-	// These different camera names produce the same sanitized output
 	collidingNames := [][]string{
 		{"Camera One", "camera-one"},
 		{"Camera  One", "camera--one"},
@@ -270,7 +255,6 @@ func TestSanitizeCollisions(t *testing.T) {
 		seen[result] = append(seen[result], input)
 	}
 
-	// Report potential collisions
 	for sanitized, originals := range seen {
 		if len(originals) > 1 {
 			t.Logf("COLLISION: sanitized %q from: %v", sanitized, originals)
@@ -282,13 +266,11 @@ func TestSanitizeCollisions(t *testing.T) {
 func TestEntityIDTooLong(t *testing.T) {
 	p := NewPlugin()
 
-	// Create a very long camera name
 	longName := strings.Repeat("a", 1000)
 
 	deviceID := p.deviceID(longName)
 	entityID := p.streamEntityID(longName, "main")
 
-	// Entity IDs can become extremely long
 	t.Logf("Device ID length: %d", len(deviceID))
 	t.Logf("Entity ID length: %d", len(entityID))
 
@@ -300,7 +282,7 @@ func TestEntityIDTooLong(t *testing.T) {
 // TestLabelCaseSensitivity exposes weakness: inconsistent label case handling
 func TestLabelCaseSensitivity(t *testing.T) {
 	p := NewPlugin()
-	p.OnInitialize(runner.Config{}, types.Storage{})
+	testInit(p)
 
 	events := []frigate.FrigateEvent{
 		{ID: "evt1", Camera: "cam1", Label: "Person", StartTime: 1000, EndTime: 0},
@@ -321,13 +303,11 @@ func TestLabelCaseSensitivity(t *testing.T) {
 		AllEvents:  events,
 	}
 
-	// Check how labels are stored (case sensitivity)
 	t.Logf("LastEvents keys: ")
 	for label := range cam.LastEvents {
 		t.Logf("  Label: %q", label)
 	}
 
-	// Test trackedLabelSet - should be case insensitive
 	cam.Config.Objects.Track = []string{"Person", "CAR", "dog"}
 	tracked := p.trackedLabelSet(cam)
 	t.Logf("Tracked labels: ")
@@ -338,10 +318,6 @@ func TestLabelCaseSensitivity(t *testing.T) {
 
 // TestJSONMarshalErrors exposes weakness: JSON marshal errors are silently ignored
 func TestJSONMarshalErrors(t *testing.T) {
-	// Create an entity with a state that will fail to marshal
-	// (Using circular references would fail, but Go doesn't easily support that)
-	// Instead, test with valid state and verify it doesn't panic
-
 	state := map[string]interface{}{
 		"key":    "value",
 		"number": 123,
@@ -354,19 +330,13 @@ func TestJSONMarshalErrors(t *testing.T) {
 	}
 
 	t.Logf("Marshaled state: %s", string(data))
-
-	// In the actual code, marshal errors are often ignored with _
-	// This test documents that weakness
 }
 
 // TestMQTTTopicPrefixEmpty exposes weakness: empty MQTT topic prefix
 func TestMQTTTopicPrefixEmpty(t *testing.T) {
 	p := NewPlugin()
+	testInit(p)
 
-	// Set empty topic prefix - should use default
-	p.OnInitialize(runner.Config{}, types.Storage{})
-
-	// Check that empty prefix gets default value
 	if p.pConfig.MQTTTopicPrefix == "" {
 		t.Log("WARNING: Empty MQTT topic prefix not defaulted - could cause topic subscription issues")
 	}
@@ -378,12 +348,12 @@ func TestPortZero(t *testing.T) {
 		input    string
 		expected int
 	}{
-		{"0", 1883},   // Should default to 1883
-		{"-1", 1883},  // Invalid, should default
-		{"abc", 1883}, // Non-numeric, should default
-		{"99999", 0},  // Out of range, current behavior accepts it
-		{"65536", 0},  // Out of range
-		{"", 1883},    // Empty, should default
+		{"0", 1883},
+		{"-1", 1883},
+		{"abc", 1883},
+		{"99999", 0},
+		{"65536", 0},
+		{"", 1883},
 	}
 
 	for _, tc := range testCases {
@@ -392,7 +362,7 @@ func TestPortZero(t *testing.T) {
 			defer os.Unsetenv("FRIGATE_MQTT_PORT")
 
 			p := NewPlugin()
-			p.OnInitialize(runner.Config{}, types.Storage{})
+			testInit(p)
 
 			t.Logf("Port input: %q -> actual: %d (expected: %d)", tc.input, p.pConfig.MQTTPort, tc.expected)
 		})
@@ -402,9 +372,8 @@ func TestPortZero(t *testing.T) {
 // TestFrigateEventStateConsistency tests that event state is correctly computed
 func TestFrigateEventStateConsistency(t *testing.T) {
 	p := NewPlugin()
-	p.OnInitialize(runner.Config{}, types.Storage{})
+	testInit(p)
 
-	// Create camera with specific event state
 	cam := &discoveredCamera{
 		Name: "test_cam",
 		LastEvents: map[string]frigate.FrigateEvent{
@@ -413,7 +382,7 @@ func TestFrigateEventStateConsistency(t *testing.T) {
 				Camera:      "test_cam",
 				Label:       "person",
 				StartTime:   1000.5,
-				EndTime:     0, // Active event
+				EndTime:     0,
 				HasSnapshot: true,
 				HasClip:     false,
 			},
@@ -435,7 +404,6 @@ func TestFrigateEventStateConsistency(t *testing.T) {
 		t.Errorf("LastEventID = %q, want %q", state.LastEventID, "evt123")
 	}
 
-	// Test non-existent label
 	emptyState := p.frigateEventState(cam, "car")
 	if emptyState.EventPresent {
 		t.Error("EventPresent should be false for non-existent label")
@@ -476,14 +444,13 @@ func TestAvailabilitySystemEntityCreation(t *testing.T) {
 				defer os.Unsetenv("FRIGATE_URL")
 			}
 
-			p.OnInitialize(runner.Config{}, types.Storage{})
+			testInit(p)
 
-			entities, err := p.OnEntityDiscover("frigate-system", nil)
+			entities, err := p.entitiesForDevice("frigate-system")
 			if err != nil {
-				t.Fatalf("OnEntityDiscover failed: %v", err)
+				t.Fatalf("entitiesForDevice failed: %v", err)
 			}
 
-			// Look for availability entity
 			var found bool
 			for _, ent := range entities {
 				if ent.ID == "availability" {
@@ -510,10 +477,8 @@ func TestDiscoveryWithFailingEndpoints(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/config":
-			// Config always works
 			fmt.Fprintln(w, `{"cameras":{"cam1":{"enabled":true,"name":"cam1","detect":{"enabled":true},"motion":{"enabled":true},"record":{"enabled":true},"snapshots":{"enabled":true},"review":{"alerts":{"enabled":true},"detections":{"enabled":true}},"objects":{"track":["person"]}}}}`)
 		case "/api/stats":
-			// Stats fails sometimes
 			failCount++
 			if failCount%2 == 0 {
 				w.WriteHeader(http.StatusInternalServerError)
@@ -521,10 +486,8 @@ func TestDiscoveryWithFailingEndpoints(t *testing.T) {
 			}
 			fmt.Fprintln(w, `{"cameras":{"cam1":{"camera_fps":15.0}}}`)
 		case "/api/streams":
-			// Streams fails
 			w.WriteHeader(http.StatusServiceUnavailable)
 		case "/api/events":
-			// Events returns empty
 			fmt.Fprintln(w, `[]`)
 		}
 	}))
@@ -533,9 +496,8 @@ func TestDiscoveryWithFailingEndpoints(t *testing.T) {
 	p := NewPlugin()
 	_ = os.Setenv("FRIGATE_URL", ts.URL)
 	defer os.Unsetenv("FRIGATE_URL")
-	p.OnInitialize(runner.Config{}, types.Storage{})
+	testInit(p)
 
-	// Discovery should still work even with some failing endpoints
 	cameras, err := p.discover()
 	if err != nil {
 		t.Fatalf("discovery failed: %v", err)
@@ -545,7 +507,6 @@ func TestDiscoveryWithFailingEndpoints(t *testing.T) {
 		t.Fatal("expected at least one camera")
 	}
 
-	// Camera should still be discovered even without stats/streams
 	cam := cameras[0]
 	if cam.Name != "cam1" {
 		t.Errorf("camera name = %q, want cam1", cam.Name)
@@ -583,12 +544,12 @@ func TestBoolOnVariations(t *testing.T) {
 	}
 }
 
-// TestHealthCheckWithoutClient tests health check when client is not configured
+// TestHealthCheckWithoutClient tests that discover returns error when client is not configured
 func TestHealthCheckWithoutClient(t *testing.T) {
 	p := NewPlugin()
-	p.OnInitialize(runner.Config{}, types.Storage{})
+	testInit(p) // no FRIGATE_URL set → client is nil
 
-	_, err := p.OnHealthCheck()
+	_, err := p.discover()
 	if err == nil {
 		t.Error("expected error when client not configured")
 	}
@@ -599,12 +560,12 @@ func TestEventAggregation(t *testing.T) {
 	p := NewPlugin()
 
 	events := []frigate.FrigateEvent{
-		{ID: "evt1", Camera: "cam1", Label: "person", StartTime: 1000, EndTime: 0},  // Active
-		{ID: "evt2", Camera: "cam1", Label: "person", StartTime: 900, EndTime: 950}, // Ended
-		{ID: "evt3", Camera: "cam1", Label: "person", StartTime: 800, EndTime: 850}, // Ended
-		{ID: "evt4", Camera: "cam1", Label: "car", StartTime: 1100, EndTime: 0},     // Active, different label
-		{ID: "evt5", Camera: "cam1", Label: "car", StartTime: 500, EndTime: 600},    // Ended
-		{ID: "evt6", Camera: "cam1", Label: "", StartTime: 700, EndTime: 0},         // Empty label
+		{ID: "evt1", Camera: "cam1", Label: "person", StartTime: 1000, EndTime: 0},
+		{ID: "evt2", Camera: "cam1", Label: "person", StartTime: 900, EndTime: 950},
+		{ID: "evt3", Camera: "cam1", Label: "person", StartTime: 800, EndTime: 850},
+		{ID: "evt4", Camera: "cam1", Label: "car", StartTime: 1100, EndTime: 0},
+		{ID: "evt5", Camera: "cam1", Label: "car", StartTime: 500, EndTime: 600},
+		{ID: "evt6", Camera: "cam1", Label: "", StartTime: 700, EndTime: 0},
 	}
 
 	cam := &discoveredCamera{
@@ -614,7 +575,6 @@ func TestEventAggregation(t *testing.T) {
 
 	agg := p.eventAggByLabel(cam)
 
-	// Check person aggregation
 	if personAgg, ok := agg["person"]; ok {
 		if personAgg.Count != 3 {
 			t.Errorf("person count = %d, want 3", personAgg.Count)
@@ -629,7 +589,6 @@ func TestEventAggregation(t *testing.T) {
 		t.Error("person aggregation not found")
 	}
 
-	// Check car aggregation
 	if carAgg, ok := agg["car"]; ok {
 		if carAgg.Count != 2 {
 			t.Errorf("car count = %d, want 2", carAgg.Count)
@@ -641,7 +600,6 @@ func TestEventAggregation(t *testing.T) {
 		t.Error("car aggregation not found")
 	}
 
-	// Empty label events should be ignored
 	if _, ok := agg[""]; ok {
 		t.Error("empty label should not be in aggregation")
 	}
