@@ -11,7 +11,7 @@ import (
 
 	frigateapp "github.com/slidebolt/plugin-frigate/app"
 	domain "github.com/slidebolt/sb-domain"
-	managersdk "github.com/slidebolt/sb-manager-sdk"
+	testkit "github.com/slidebolt/sb-testkit"
 	storage "github.com/slidebolt/sb-storage-sdk"
 )
 
@@ -76,7 +76,7 @@ func TestDiscoveryCreatesCameraAndChildEntities(t *testing.T) {
 	t.Setenv("FRIGATE_GO2RTC_URL", "https://go2rtc.example")
 	t.Setenv("FRIGATE_EVENT_LIMIT", "20")
 
-	env := managersdk.NewTestEnv(t)
+	env := testkit.NewTestEnv(t)
 	env.Start("messenger")
 	env.Start("storage")
 
@@ -192,7 +192,7 @@ func TestDiscoveryReconcilesNewCameraWithoutRestart(t *testing.T) {
 	t.Setenv("FRIGATE_URL", server.URL)
 	t.Setenv("FRIGATE_TIMEOUT_MS", "200")
 
-	env := managersdk.NewTestEnv(t)
+	env := testkit.NewTestEnv(t)
 	env.Start("messenger")
 	env.Start("storage")
 

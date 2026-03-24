@@ -13,7 +13,7 @@ import (
 
 "github.com/cucumber/godog"
 domain "github.com/slidebolt/sb-domain"
-managersdk "github.com/slidebolt/sb-manager-sdk"
+testkit "github.com/slidebolt/sb-testkit"
 messenger "github.com/slidebolt/sb-messenger-sdk"
 storage "github.com/slidebolt/sb-storage-sdk"
 translate "github.com/slidebolt/plugin-frigate/internal/translate"
@@ -25,7 +25,7 @@ translate "github.com/slidebolt/plugin-frigate/internal/translate"
 
 type bddCtx struct {
 t     *testing.T
-env   *managersdk.TestEnv
+env   *testkit.TestEnv
 store storage.Storage
 cmds  *messenger.Commands
 
@@ -41,7 +41,7 @@ cmdSub      messenger.Subscription
 
 func newBDDCtx(t *testing.T) *bddCtx {
 t.Helper()
-env := managersdk.NewTestEnv(t)
+env := testkit.NewTestEnv(t)
 env.Start("messenger")
 env.Start("storage")
 c := &bddCtx{
