@@ -11,7 +11,7 @@ require (
 	github.com/slidebolt/sb-runtime v1.0.6
 	github.com/slidebolt/sb-storage-sdk v1.0.6
 	github.com/slidebolt/sb-storage-server v1.0.8
-	github.com/slidebolt/sb-testkit v1.0.8
+	github.com/slidebolt/sb-testkit v1.0.9
 )
 
 require (

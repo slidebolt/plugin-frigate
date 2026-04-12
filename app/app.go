@@ -1121,7 +1121,7 @@ func (a *App) saveEntityIfChanged(entity domain.Entity) (bool, error) {
 		return false, fmt.Errorf("marshal %s: %w", entity.Key(), err)
 	}
 	current, err := a.store.Get(entity)
-	if err == nil && normalizedJSON(current) == normalizedJSON(body) {
+	if err == nil && len(current) > 0 && normalizedJSON(current) == normalizedJSON(body) {
 		return false, nil
 	}
 	if err := a.store.Save(entity); err != nil {
@@ -1129,7 +1129,6 @@ func (a *App) saveEntityIfChanged(entity domain.Entity) (bool, error) {
 	}
 	return true, nil
 }
-
 func (a *App) deleteEntityByKey(key string) error {
 	return a.store.Delete(entityKey(key))
 }
