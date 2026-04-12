@@ -111,6 +111,7 @@ return c.saveEntity(domain.Entity{
 ID: id, Plugin: plug, DeviceID: dev,
 Type: "light", Name: name,
 State: domain.Light{Power: powerStr == "on", Brightness: brightness, Temperature: temperature},
+
 })
 }
 
@@ -240,7 +241,7 @@ return err
 return c.saveEntity(domain.Entity{
 ID: id, Plugin: plug, DeviceID: dev,
 Type: "climate", Name: name,
-State: domain.Climate{HVACMode: hvacMode, Temperature: temperature},
+State: domain.Climate{HVACMode: hvacMode, Temperature: float64(temperature)},
 })
 }
 
@@ -252,7 +253,7 @@ return err
 return c.saveEntity(domain.Entity{
 ID: id, Plugin: plug, DeviceID: dev,
 Type: "climate", Name: name,
-State: domain.Climate{HVACMode: hvacMode, Temperature: temperature, TemperatureUnit: unit},
+State: domain.Climate{HVACMode: hvacMode, Temperature: float64(temperature), TemperatureUnit: unit},
 })
 }
 
@@ -425,7 +426,7 @@ return err
 return c.saveEntity(domain.Entity{
 ID: id, Plugin: plug, DeviceID: dev,
 Type: "climate",
-State: domain.Climate{HVACMode: hvacMode, Temperature: temperature},
+State: domain.Climate{HVACMode: hvacMode, Temperature: float64(temperature)},
 })
 }
 
@@ -567,7 +568,7 @@ st, ok := c.lastEntity.State.(domain.Light)
 if !ok {
 return fmt.Errorf("state type: got %T, want domain.Light", c.lastEntity.State)
 }
-if st.Temperature != float64(expected) {
+if st.Temperature != expected {
 return fmt.Errorf("light.Temperature: got %v, want %v", st.Temperature, expected)
 }
 return nil

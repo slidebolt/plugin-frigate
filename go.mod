@@ -4,12 +4,14 @@ go 1.26.1
 
 require (
 	github.com/cucumber/godog v0.15.1
+	github.com/eclipse/paho.mqtt.golang v1.5.1
 	github.com/slidebolt/sb-contract v1.0.6
-	github.com/slidebolt/sb-domain v1.0.6
+	github.com/slidebolt/sb-domain v1.0.12
 	github.com/slidebolt/sb-messenger-sdk v1.0.7
 	github.com/slidebolt/sb-runtime v1.0.6
 	github.com/slidebolt/sb-storage-sdk v1.0.6
-	github.com/slidebolt/sb-testkit v1.0.6
+	github.com/slidebolt/sb-storage-server v1.0.8
+	github.com/slidebolt/sb-testkit v1.0.8
 )
 
 require (
@@ -40,6 +42,7 @@ require (
 	github.com/gofrs/uuid v4.3.1+incompatible // indirect
 	github.com/golang/snappy v0.0.4 // indirect
 	github.com/google/go-tpm v0.9.8 // indirect
+	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/hashicorp/go-immutable-radix v1.3.1 // indirect
 	github.com/hashicorp/go-memdb v1.3.4 // indirect
 	github.com/hashicorp/golang-lru v0.5.4 // indirect
@@ -54,14 +57,16 @@ require (
 	github.com/nats-io/nats.go v1.49.0 // indirect
 	github.com/nats-io/nkeys v0.4.15 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
-	github.com/slidebolt/sb-logging-sdk v1.0.2 // indirect
-	github.com/slidebolt/sb-script v1.0.7 // indirect
-	github.com/slidebolt/sb-storage-server v1.0.7 // indirect
-	github.com/slidebolt/sb-virtual v1.0.7 // indirect
+	github.com/robfig/cron/v3 v3.0.1 // indirect
+	github.com/slidebolt/sb-logging-sdk v1.0.8 // indirect
+	github.com/slidebolt/sb-script v1.0.8 // indirect
+	github.com/slidebolt/sb-virtual v1.0.8 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.etcd.io/bbolt v1.4.0 // indirect
 	golang.org/x/crypto v0.48.0 // indirect
+	golang.org/x/net v0.49.0 // indirect
+	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect

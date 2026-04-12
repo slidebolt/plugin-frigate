@@ -21,6 +21,7 @@ func TestBDDFeatures(t *testing.T) {
 		ScenarioInitializer: func(ctx *godog.ScenarioContext) {
 			c := newBDDCtx(t)
 			c.RegisterSteps(ctx)
+			c.RegisterMQTTSteps(ctx)
 		},
 		Options: &godog.Options{
 			Format:   "pretty",

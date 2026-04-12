@@ -17,10 +17,13 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 	contract "github.com/slidebolt/sb-contract"
 	domain "github.com/slidebolt/sb-domain"
 	messenger "github.com/slidebolt/sb-messenger-sdk"
@@ -30,12 +33,20 @@ import (
 const PluginID = "plugin-frigate"
 
 type FrigateConfig struct {
-	URL        string `json:"url"`
-	Go2RTCURL  string `json:"go2rtc_url,omitempty"`
-	Username   string `json:"username,omitempty"`
-	Password   string `json:"password,omitempty"`
-	Timeout    int    `json:"timeout_ms,omitempty"`
-	EventLimit int    `json:"event_limit,omitempty"`
+	URL       string     `json:"url"`
+	Go2RTCURL string     `json:"go2rtc_url,omitempty"`
+	Username  string     `json:"username,omitempty"`
+	Password  string     `json:"password,omitempty"`
+	Timeout   int        `json:"timeout_ms,omitempty"`
+	MQTT      MQTTConfig `json:"mqtt,omitempty"`
+}
+
+type MQTTConfig struct {
+	Host        string `json:"host"`
+	Port        string `json:"port"`
+	User        string `json:"user,omitempty"`
+	Password    string `json:"password,omitempty"`
+	TopicPrefix string `json:"topic_prefix,omitempty"`
 }
 
 type FeatureToggle struct {
@@ -163,7 +174,7 @@ type CameraEnableSnapshots struct{}
 type CameraDisableSnapshots struct{}
 
 func init() {
-	domain.Register("frigate_camera", CameraState{})
+	domain.Register("frigate_camera_status", CameraState{})
 	domain.Register("frigate_availability", AvailabilityState{})
 	domain.Register("frigate_stream", StreamState{})
 	domain.Register("frigate_image", ImageState{})
@@ -183,6 +194,8 @@ type FrigateClient struct {
 	Password   string
 	HTTPClient *http.Client
 }
+
+const ReconcileInterval = 10 * time.Minute
 
 func NewFrigateClient(baseURL, username, password string, timeout time.Duration) *FrigateClient {
 	if timeout == 0 {
@@ -243,31 +256,6 @@ func (c *FrigateClient) GetConfig(ctx context.Context) (map[string]CameraConfig,
 	}
 
 	return config.Cameras, nil
-}
-
-func (c *FrigateClient) GetEvents(ctx context.Context, camera string, limit int) ([]Event, error) {
-	path := fmt.Sprintf("/api/events?limit=%d", limit)
-	if camera != "" {
-		path += fmt.Sprintf("&cameras=%s", camera)
-	}
-
-	resp, err := c.get(ctx, path)
-	if err != nil {
-		return nil, fmt.Errorf("get events: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("get events: HTTP %d: %s", resp.StatusCode, string(body))
-	}
-
-	var events []Event
-	if err := json.NewDecoder(resp.Body).Decode(&events); err != nil {
-		return nil, fmt.Errorf("decode events: %w", err)
-	}
-
-	return events, nil
 }
 
 func (c *FrigateClient) GetSnapshot(ctx context.Context, camera string) ([]byte, error) {
@@ -332,20 +320,31 @@ func (c *FrigateClient) SetSnapshots(ctx context.Context, camera string, enabled
 }
 
 type App struct {
-	msg    messenger.Messenger
-	store  storage.Storage
-	cmds   *messenger.Commands
-	subs   []messenger.Subscription
-	config FrigateConfig
-	client *FrigateClient
-	ctx    context.Context
-	cancel context.CancelFunc
+	msg        messenger.Messenger
+	store      storage.Storage
+	cmds       *messenger.Commands
+	subs       []messenger.Subscription
+	config     FrigateConfig
+	client     *FrigateClient
+	mqttClient mqtt.Client
+	ctx        context.Context
+	cancel     context.CancelFunc
+	mu         sync.Mutex
+	runtime    map[string]*cameraRuntime
+	newTicker  func(time.Duration) *time.Ticker
 }
 
-type labelAgg struct {
-	Count       int
-	ActiveCount int
-	LastEvent   *Event
+type labelRuntime struct {
+	Count     int
+	Active    map[string]Event
+	LastEvent *Event
+}
+
+type cameraRuntime struct {
+	Labels    map[string]struct{}
+	ByLabel   map[string]*labelRuntime
+	LastEvent *Event
+	LastError string
 }
 
 type streamSpec struct {
@@ -356,7 +355,12 @@ type streamSpec struct {
 	Kind   string
 }
 
-func New() *App { return &App{} }
+func New() *App {
+	return &App{
+		runtime:   make(map[string]*cameraRuntime),
+		newTicker: time.NewTicker,
+	}
+}
 
 func (a *App) Hello() contract.HelloResponse {
 	return contract.HelloResponse{
@@ -409,8 +413,40 @@ func (a *App) OnStart(deps map[string]json.RawMessage) (json.RawMessage, error) 
 		if err := a.discoverCameras(); err != nil {
 			log.Printf("plugin-frigate: camera discovery error: %v", err)
 		}
-		go a.monitorEvents(a.ctx)
 		go a.reconcileCameras(a.ctx)
+
+		// Initialize MQTT if configured
+		if a.config.MQTT.Host != "" {
+			opts := mqtt.NewClientOptions()
+			brokerURL := fmt.Sprintf("tcp://%s:%s", a.config.MQTT.Host, a.config.MQTT.Port)
+			if a.config.MQTT.Port == "" {
+				brokerURL = fmt.Sprintf("tcp://%s:1883", a.config.MQTT.Host)
+			}
+			opts.AddBroker(brokerURL)
+			if a.config.MQTT.User != "" {
+				opts.SetUsername(a.config.MQTT.User)
+			}
+			if a.config.MQTT.Password != "" {
+				opts.SetPassword(a.config.MQTT.Password)
+			}
+			opts.SetClientID(PluginID + "-" + fmt.Sprintf("%d", time.Now().UnixNano()))
+
+			a.mqttClient = mqtt.NewClient(opts)
+			if token := a.mqttClient.Connect(); token.Wait() && token.Error() != nil {
+				log.Printf("plugin-frigate: failed to connect to MQTT: %v", token.Error())
+			} else {
+				topic := a.config.MQTT.TopicPrefix + "/events"
+				if token := a.mqttClient.Subscribe(topic, 0, func(client mqtt.Client, msg mqtt.Message) {
+					if err := a.HandleMQTTEvent(msg.Payload()); err != nil {
+						log.Printf("plugin-frigate: mqtt handle error: %v", err)
+					}
+				}); token.Wait() && token.Error() != nil {
+					log.Printf("plugin-frigate: failed to subscribe to MQTT topic %s: %v", topic, token.Error())
+				} else {
+					log.Printf("plugin-frigate: listening for real-time events on MQTT topic: %s", topic)
+				}
+			}
+		}
 	}
 
 	log.Println("plugin-frigate: started")
@@ -420,6 +456,9 @@ func (a *App) OnStart(deps map[string]json.RawMessage) (json.RawMessage, error) 
 func (a *App) OnShutdown() error {
 	if a.cancel != nil {
 		a.cancel()
+	}
+	if a.mqttClient != nil && a.mqttClient.IsConnected() {
+		a.mqttClient.Disconnect(250)
 	}
 	for _, sub := range a.subs {
 		sub.Unsubscribe()
@@ -461,10 +500,13 @@ func (a *App) loadConfig() error {
 		}
 		a.config.Timeout = timeout
 	}
-	if limit := os.Getenv("FRIGATE_EVENT_LIMIT"); limit != "" {
-		if n, err := strconv.Atoi(limit); err == nil && n > 0 {
-			a.config.EventLimit = n
-		}
+	a.config.MQTT.Host = os.Getenv("FRIGATE_MQTT_HOST")
+	a.config.MQTT.Port = os.Getenv("FRIGATE_MQTT_PORT")
+	a.config.MQTT.User = os.Getenv("FRIGATE_MQTT_USER")
+	a.config.MQTT.Password = os.Getenv("FRIGATE_MQTT_PASSWORD")
+	a.config.MQTT.TopicPrefix = os.Getenv("FRIGATE_MQTT_TOPIC_PREFIX")
+	if a.config.MQTT.TopicPrefix == "" {
+		a.config.MQTT.TopicPrefix = "frigate"
 	}
 
 	return nil
@@ -478,54 +520,11 @@ func (a *App) discoverCameras() error {
 	if err != nil {
 		return fmt.Errorf("get config: %w", err)
 	}
-	limit := a.config.EventLimit
-	if limit <= 0 {
-		limit = 100
-	}
-	events, err := a.client.GetEvents(ctx, "", limit)
-	if err != nil {
-		log.Printf("plugin-frigate: failed to get events during discovery: %v", err)
-		events = nil
-	}
-	aggByCamera := aggregateEventsByCamera(events)
-
-	for name, config := range cameras {
-		cameraEntity := domain.Entity{
-			ID:       name,
-			Plugin:   PluginID,
-			DeviceID: name,
-			Type:     "frigate_camera",
-			Name:     fmt.Sprintf("Frigate Camera %s", name),
-			Commands: []string{
-				"frigate_camera_enable_detect",
-				"frigate_camera_disable_detect",
-				"frigate_camera_enable_record",
-				"frigate_camera_disable_record",
-				"frigate_camera_enable_snapshots",
-				"frigate_camera_disable_snapshots",
-			},
-			State: a.cameraState(config, aggByCamera[name]),
-		}
-
-		if err := a.store.Save(cameraEntity); err != nil {
-			log.Printf("plugin-frigate: failed to save camera entity %s: %v", name, err)
-		} else {
-			log.Printf("plugin-frigate: registered camera %s (enabled=%v, detect=%v)",
-				name, config.Enabled, config.Detect.Enabled)
-		}
-
-		for _, entity := range a.childEntities(name, config, aggByCamera[name]) {
-			if err := a.store.Save(entity); err != nil {
-				log.Printf("plugin-frigate: failed to save entity %s: %v", entity.Key(), err)
-			}
-		}
-	}
-
-	return nil
+	return a.syncCameraConfig(cameras)
 }
 
 func (a *App) reconcileCameras(ctx context.Context) {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := a.newTicker(ReconcileInterval)
 	defer ticker.Stop()
 
 	for {
@@ -540,53 +539,8 @@ func (a *App) reconcileCameras(ctx context.Context) {
 	}
 }
 
-func (a *App) monitorEvents(ctx context.Context) {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			a.checkEvents()
-		}
-	}
-}
-
-func (a *App) checkEvents() {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	events, err := a.client.GetEvents(ctx, "", 10)
-	if err != nil {
-		log.Printf("plugin-frigate: failed to get events: %v", err)
-		return
-	}
-
-	for _, event := range events {
-		a.updateCameraState(event.Camera, func(s *CameraState) {
-			s.LastEvent = &event
-		})
-	}
-
-	aggByCamera := aggregateEventsByCamera(events)
-	for camera, agg := range aggByCamera {
-		for _, entity := range a.eventEntities(camera, agg) {
-			if err := a.store.Save(entity); err != nil {
-				log.Printf("plugin-frigate: failed to update event entity %s: %v", entity.Key(), err)
-			}
-		}
-		for _, entity := range a.summaryEntities(camera, agg) {
-			if err := a.store.Save(entity); err != nil {
-				log.Printf("plugin-frigate: failed to update summary entity %s: %v", entity.Key(), err)
-			}
-		}
-	}
-}
-
 func (a *App) handleCommand(addr messenger.Address, cmd any) {
-	cameraID := addr.EntityID
+	cameraID := addr.DeviceID
 
 	switch cmd.(type) {
 	case CameraEnableDetect:
@@ -612,6 +566,7 @@ func (a *App) handleEnableDetect(cameraID string, enabled bool) {
 
 	if err := a.client.SetDetect(ctx, cameraID, enabled); err != nil {
 		log.Printf("plugin-frigate: failed to set detect for %s: %v", cameraID, err)
+		a.setRuntimeLastError(cameraID, err.Error())
 		a.updateCameraState(cameraID, func(s *CameraState) {
 			s.LastError = err.Error()
 		})
@@ -621,10 +576,12 @@ func (a *App) handleEnableDetect(cameraID string, enabled bool) {
 	log.Printf("plugin-frigate: detection %s for camera %s",
 		map[bool]string{true: "enabled", false: "disabled"}[enabled], cameraID)
 
+	a.setRuntimeLastError(cameraID, "")
 	a.updateCameraState(cameraID, func(s *CameraState) {
 		s.DetectEnabled = enabled
 		s.LastError = ""
 	})
+	a.updateStatusEntity(cameraID, "status-detect", onOff(enabled))
 }
 
 func (a *App) handleEnableRecord(cameraID string, enabled bool) {
@@ -633,6 +590,7 @@ func (a *App) handleEnableRecord(cameraID string, enabled bool) {
 
 	if err := a.client.SetRecord(ctx, cameraID, enabled); err != nil {
 		log.Printf("plugin-frigate: failed to set record for %s: %v", cameraID, err)
+		a.setRuntimeLastError(cameraID, err.Error())
 		a.updateCameraState(cameraID, func(s *CameraState) {
 			s.LastError = err.Error()
 		})
@@ -642,10 +600,12 @@ func (a *App) handleEnableRecord(cameraID string, enabled bool) {
 	log.Printf("plugin-frigate: recording %s for camera %s",
 		map[bool]string{true: "enabled", false: "disabled"}[enabled], cameraID)
 
+	a.setRuntimeLastError(cameraID, "")
 	a.updateCameraState(cameraID, func(s *CameraState) {
 		s.RecordEnabled = enabled
 		s.LastError = ""
 	})
+	a.updateStatusEntity(cameraID, "status-record", onOff(enabled))
 }
 
 func (a *App) handleEnableSnapshots(cameraID string, enabled bool) {
@@ -654,6 +614,7 @@ func (a *App) handleEnableSnapshots(cameraID string, enabled bool) {
 
 	if err := a.client.SetSnapshots(ctx, cameraID, enabled); err != nil {
 		log.Printf("plugin-frigate: failed to set snapshots for %s: %v", cameraID, err)
+		a.setRuntimeLastError(cameraID, err.Error())
 		a.updateCameraState(cameraID, func(s *CameraState) {
 			s.LastError = err.Error()
 		})
@@ -663,14 +624,16 @@ func (a *App) handleEnableSnapshots(cameraID string, enabled bool) {
 	log.Printf("plugin-frigate: snapshots %s for camera %s",
 		map[bool]string{true: "enabled", false: "disabled"}[enabled], cameraID)
 
+	a.setRuntimeLastError(cameraID, "")
 	a.updateCameraState(cameraID, func(s *CameraState) {
 		s.SnapshotsEnabled = enabled
 		s.LastError = ""
 	})
+	a.updateStatusEntity(cameraID, "status-snapshots", onOff(enabled))
 }
 
 func (a *App) updateCameraState(cameraID string, update func(*CameraState)) {
-	eKey := domain.EntityKey{Plugin: PluginID, DeviceID: cameraID, ID: cameraID}
+	eKey := domain.EntityKey{Plugin: PluginID, DeviceID: cameraID, ID: "camera-state"}
 	raw, err := a.store.Get(eKey)
 	if err != nil {
 		log.Printf("plugin-frigate: failed to get camera %s: %v", cameraID, err)
@@ -687,9 +650,49 @@ func (a *App) updateCameraState(cameraID string, update func(*CameraState)) {
 	update(&state)
 	entity.State = state
 
-	if err := a.store.Save(entity); err != nil {
+	if _, err := a.saveEntityIfChanged(entity); err != nil {
 		log.Printf("plugin-frigate: failed to update camera state %s: %v", cameraID, err)
 	}
+}
+
+func (a *App) updateStatusEntity(cameraID, entityID, value string) {
+	eKey := domain.EntityKey{Plugin: PluginID, DeviceID: cameraID, ID: entityID}
+	raw, err := a.store.Get(eKey)
+	if err != nil {
+		log.Printf("plugin-frigate: failed to get status %s for %s: %v", entityID, cameraID, err)
+		return
+	}
+	var entity domain.Entity
+	if err := json.Unmarshal(raw, &entity); err != nil {
+		log.Printf("plugin-frigate: failed to unmarshal status %s for %s: %v", entityID, cameraID, err)
+		return
+	}
+	state := StatusSensorState{Value: value, Available: true}
+	if current, ok := entity.State.(StatusSensorState); ok {
+		state = current
+		state.Value = value
+	}
+	entity.State = state
+	if _, err := a.saveEntityIfChanged(entity); err != nil {
+		log.Printf("plugin-frigate: failed to update status %s for %s: %v", entityID, cameraID, err)
+	}
+}
+
+func (a *App) setRuntimeLastError(cameraID, message string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.runtime == nil {
+		a.runtime = make(map[string]*cameraRuntime)
+	}
+	runtime, ok := a.runtime[cameraID]
+	if !ok {
+		runtime = &cameraRuntime{
+			Labels:  make(map[string]struct{}),
+			ByLabel: make(map[string]*labelRuntime),
+		}
+		a.runtime[cameraID] = runtime
+	}
+	runtime.LastError = message
 }
 
 func ConvertToCameraState(v any) CameraState {
@@ -733,11 +736,12 @@ func ConvertToCameraState(v any) CameraState {
 	return state
 }
 
-func (a *App) cameraState(config CameraConfig, agg map[string]labelAgg) CameraState {
+func (a *App) cameraState(config CameraConfig, runtime *cameraRuntime) CameraState {
 	zones := make([]string, 0, len(config.Zones))
 	for zoneName := range config.Zones {
 		zones = append(zones, zoneName)
 	}
+	sort.Strings(zones)
 
 	state := CameraState{
 		Connected:        true,
@@ -747,17 +751,26 @@ func (a *App) cameraState(config CameraConfig, agg map[string]labelAgg) CameraSt
 		SnapshotsEnabled: config.Snap.Enabled,
 		Zones:            zones,
 	}
-	for _, labelAgg := range agg {
-		if labelAgg.LastEvent != nil && (state.LastEvent == nil || labelAgg.LastEvent.StartTime > state.LastEvent.StartTime) {
-			event := *labelAgg.LastEvent
+	if runtime != nil {
+		state.LastError = runtime.LastError
+		if runtime.LastEvent != nil {
+			event := *runtime.LastEvent
 			state.LastEvent = &event
 		}
 	}
 	return state
 }
 
-func (a *App) childEntities(camera string, config CameraConfig, agg map[string]labelAgg) []domain.Entity {
+func (a *App) childEntities(camera string, config CameraConfig, runtime *cameraRuntime) []domain.Entity {
 	entities := []domain.Entity{
+		{
+			ID:       "camera-state",
+			Plugin:   PluginID,
+			DeviceID: camera,
+			Type:     "frigate_camera_status",
+			Name:     "Camera State",
+			State:    a.cameraState(config, runtime),
+		},
 		{
 			ID:       "availability",
 			Plugin:   PluginID,
@@ -796,24 +809,19 @@ func (a *App) childEntities(camera string, config CameraConfig, agg map[string]l
 		})
 	}
 
-	entities = append(entities, a.eventEntities(camera, agg)...)
-	entities = append(entities, a.summaryEntities(camera, agg)...)
+	entities = append(entities, a.eventEntities(camera, runtime)...)
+	entities = append(entities, a.summaryEntities(camera, runtime)...)
 	entities = append(entities, a.configEntities(camera, config)...)
+	entities = append(entities, a.commandEntities(camera)...)
 	return entities
 }
 
-func (a *App) eventEntities(camera string, agg map[string]labelAgg) []domain.Entity {
-	labels := make([]string, 0, len(agg))
-	for label := range agg {
-		labels = append(labels, label)
-	}
-	if len(labels) == 0 {
-		labels = []string{"person", "car"}
-	}
-
+func (a *App) eventEntities(camera string, runtime *cameraRuntime) []domain.Entity {
+	labels := runtimeLabels(runtime)
 	entities := make([]domain.Entity, 0, len(labels))
 	for _, label := range labels {
-		item := agg[label]
+		item := runtime.label(label)
+		activeCount := len(item.Active)
 		state := EventSensorState{
 			Camera:       camera,
 			Label:        label,
@@ -825,7 +833,7 @@ func (a *App) eventEntities(camera string, agg map[string]labelAgg) []domain.Ent
 			state.LastEventID = item.LastEvent.ID
 			state.HasSnapshot = item.LastEvent.HasSnapshot
 			state.HasClip = item.LastEvent.HasClip
-			state.EventPresent = true
+			state.EventPresent = activeCount > 0
 			if item.LastEvent.StartTime > 0 {
 				state.LastEventAt = time.Unix(int64(item.LastEvent.StartTime), 0).UTC().Format(time.RFC3339)
 			}
@@ -842,12 +850,15 @@ func (a *App) eventEntities(camera string, agg map[string]labelAgg) []domain.Ent
 	return entities
 }
 
-func (a *App) summaryEntities(camera string, agg map[string]labelAgg) []domain.Entity {
+func (a *App) summaryEntities(camera string, runtime *cameraRuntime) []domain.Entity {
 	allCount := 0
 	allActive := 0
-	for _, item := range agg {
-		allCount += item.Count
-		allActive += item.ActiveCount
+	if runtime != nil {
+		for _, label := range runtimeLabels(runtime) {
+			item := runtime.label(label)
+			allCount += item.Count
+			allActive += len(item.Active)
+		}
 	}
 	occupancy := "Clear"
 	if allActive > 0 {
@@ -947,29 +958,274 @@ func (a *App) configEntities(camera string, config CameraConfig) []domain.Entity
 	}
 }
 
-func aggregateEventsByCamera(events []Event) map[string]map[string]labelAgg {
-	out := make(map[string]map[string]labelAgg)
-	for _, event := range events {
-		camera := strings.TrimSpace(event.Camera)
-		label := strings.ToLower(strings.TrimSpace(event.Label))
-		if camera == "" || label == "" {
+func (a *App) commandEntities(camera string) []domain.Entity {
+	return []domain.Entity{
+		{
+			ID:       "detect-enable",
+			Plugin:   PluginID,
+			DeviceID: camera,
+			Type:     "button",
+			Name:     "Enable Detect",
+			Commands: []string{"frigate_camera_enable_detect"},
+			State:    domain.Button{},
+		},
+		{
+			ID:       "detect-disable",
+			Plugin:   PluginID,
+			DeviceID: camera,
+			Type:     "button",
+			Name:     "Disable Detect",
+			Commands: []string{"frigate_camera_disable_detect"},
+			State:    domain.Button{},
+		},
+		{
+			ID:       "record-enable",
+			Plugin:   PluginID,
+			DeviceID: camera,
+			Type:     "button",
+			Name:     "Enable Record",
+			Commands: []string{"frigate_camera_enable_record"},
+			State:    domain.Button{},
+		},
+		{
+			ID:       "record-disable",
+			Plugin:   PluginID,
+			DeviceID: camera,
+			Type:     "button",
+			Name:     "Disable Record",
+			Commands: []string{"frigate_camera_disable_record"},
+			State:    domain.Button{},
+		},
+		{
+			ID:       "snapshots-enable",
+			Plugin:   PluginID,
+			DeviceID: camera,
+			Type:     "button",
+			Name:     "Enable Snapshots",
+			Commands: []string{"frigate_camera_enable_snapshots"},
+			State:    domain.Button{},
+		},
+		{
+			ID:       "snapshots-disable",
+			Plugin:   PluginID,
+			DeviceID: camera,
+			Type:     "button",
+			Name:     "Disable Snapshots",
+			Commands: []string{"frigate_camera_disable_snapshots"},
+			State:    domain.Button{},
+		},
+	}
+}
+
+func configuredLabels(config CameraConfig) []string {
+	labels := make([]string, 0, len(config.Objects.Track))
+	seen := make(map[string]struct{}, len(config.Objects.Track))
+	for _, label := range config.Objects.Track {
+		label = strings.ToLower(strings.TrimSpace(label))
+		if label == "" {
 			continue
 		}
-		if out[camera] == nil {
-			out[camera] = make(map[string]labelAgg)
+		if _, ok := seen[label]; ok {
+			continue
 		}
-		item := out[camera][label]
-		item.Count++
-		if event.EndTime == 0 {
-			item.ActiveCount++
-		}
-		if item.LastEvent == nil || event.StartTime > item.LastEvent.StartTime {
-			e := event
-			item.LastEvent = &e
-		}
-		out[camera][label] = item
+		seen[label] = struct{}{}
+		labels = append(labels, label)
 	}
-	return out
+	if len(labels) == 0 {
+		labels = []string{"car", "person"}
+	}
+	sort.Strings(labels)
+	return labels
+}
+
+func runtimeLabels(runtime *cameraRuntime) []string {
+	if runtime == nil || len(runtime.Labels) == 0 {
+		return []string{"car", "person"}
+	}
+	labels := make([]string, 0, len(runtime.Labels))
+	for label := range runtime.Labels {
+		labels = append(labels, label)
+	}
+	sort.Strings(labels)
+	return labels
+}
+
+func (r *cameraRuntime) label(label string) *labelRuntime {
+	if r.ByLabel == nil {
+		r.ByLabel = make(map[string]*labelRuntime)
+	}
+	if r.Labels == nil {
+		r.Labels = make(map[string]struct{})
+	}
+	if _, ok := r.Labels[label]; !ok {
+		r.Labels[label] = struct{}{}
+	}
+	if existing, ok := r.ByLabel[label]; ok {
+		return existing
+	}
+	state := &labelRuntime{Active: make(map[string]Event)}
+	r.ByLabel[label] = state
+	return state
+}
+
+func (a *App) ensureCameraRuntime(camera string, config CameraConfig) *cameraRuntime {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.runtime == nil {
+		a.runtime = make(map[string]*cameraRuntime)
+	}
+	state, ok := a.runtime[camera]
+	if !ok {
+		state = &cameraRuntime{
+			Labels:  make(map[string]struct{}),
+			ByLabel: make(map[string]*labelRuntime),
+		}
+		a.runtime[camera] = state
+	}
+	for _, label := range configuredLabels(config) {
+		state.label(label)
+	}
+	return cloneRuntime(state)
+}
+
+func (a *App) runtimeSnapshot(camera string) *cameraRuntime {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.runtime == nil {
+		return &cameraRuntime{
+			Labels:  map[string]struct{}{"car": {}, "person": {}},
+			ByLabel: map[string]*labelRuntime{},
+		}
+	}
+	state, ok := a.runtime[camera]
+	if !ok {
+		return &cameraRuntime{
+			Labels:  map[string]struct{}{"car": {}, "person": {}},
+			ByLabel: map[string]*labelRuntime{},
+		}
+	}
+	return cloneRuntime(state)
+}
+
+func normalizedJSON(data []byte) string {
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, data); err != nil {
+		return string(data)
+	}
+	return buf.String()
+}
+
+func (a *App) saveEntityIfChanged(entity domain.Entity) (bool, error) {
+	body, err := json.Marshal(entity)
+	if err != nil {
+		return false, fmt.Errorf("marshal %s: %w", entity.Key(), err)
+	}
+	current, err := a.store.Get(entity)
+	if err == nil && normalizedJSON(current) == normalizedJSON(body) {
+		return false, nil
+	}
+	if err := a.store.Save(entity); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (a *App) deleteEntityByKey(key string) error {
+	return a.store.Delete(entityKey(key))
+}
+
+func (a *App) desiredEntities(camera string, config CameraConfig) []domain.Entity {
+	runtime := a.ensureCameraRuntime(camera, config)
+	return a.childEntities(camera, config, runtime)
+}
+
+func (a *App) syncCameraConfig(cameras map[string]CameraConfig) error {
+	desired := make(map[string]domain.Entity)
+	cameraNames := make([]string, 0, len(cameras))
+	for name := range cameras {
+		cameraNames = append(cameraNames, name)
+	}
+	sort.Strings(cameraNames)
+	for _, name := range cameraNames {
+		config := cameras[name]
+		for _, entity := range a.desiredEntities(name, config) {
+			desired[entity.Key()] = entity
+		}
+	}
+
+	existing, err := a.store.Search(PluginID + ".>")
+	if err != nil {
+		return fmt.Errorf("search existing frigate entities: %w", err)
+	}
+	for _, key := range sortedKeys(desired) {
+		entity := desired[key]
+		changed, err := a.saveEntityIfChanged(entity)
+		if err != nil {
+			log.Printf("plugin-frigate: failed to save entity %s: %v", key, err)
+			continue
+		}
+		if changed && entity.ID == "camera-state" {
+			state := entity.State.(CameraState)
+			log.Printf("plugin-frigate: synced camera %s (enabled=%v, detect=%v)",
+				entity.DeviceID, state.Enabled, state.DetectEnabled)
+		}
+	}
+
+	for _, entry := range existing {
+		if _, ok := desired[entry.Key]; ok {
+			continue
+		}
+		if err := a.deleteEntityByKey(entry.Key); err != nil {
+			log.Printf("plugin-frigate: failed to delete stale entity %s: %v", entry.Key, err)
+		}
+	}
+	return nil
+}
+
+func sortedKeys(m map[string]domain.Entity) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+type entityKey string
+
+func (k entityKey) Key() string { return string(k) }
+
+func cloneRuntime(src *cameraRuntime) *cameraRuntime {
+	if src == nil {
+		return nil
+	}
+	dst := &cameraRuntime{
+		Labels:    make(map[string]struct{}, len(src.Labels)),
+		ByLabel:   make(map[string]*labelRuntime, len(src.ByLabel)),
+		LastError: src.LastError,
+	}
+	if src.LastEvent != nil {
+		e := *src.LastEvent
+		dst.LastEvent = &e
+	}
+	for label := range src.Labels {
+		dst.Labels[label] = struct{}{}
+	}
+	for label, item := range src.ByLabel {
+		copied := &labelRuntime{
+			Count:  item.Count,
+			Active: make(map[string]Event, len(item.Active)),
+		}
+		if item.LastEvent != nil {
+			e := *item.LastEvent
+			copied.LastEvent = &e
+		}
+		for id, event := range item.Active {
+			copied.Active[id] = event
+		}
+		dst.ByLabel[label] = copied
+	}
+	return dst
 }
 
 func streamSpecs() []streamSpec {

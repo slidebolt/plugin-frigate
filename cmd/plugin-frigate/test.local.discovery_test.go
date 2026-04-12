@@ -5,29 +5,11 @@ package main
 import (
 	"context"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
 	app "github.com/slidebolt/plugin-frigate/app"
 )
-
-func loadEnvLocal(t *testing.T) {
-	t.Helper()
-	data, err := os.ReadFile("../../.env.local")
-	if err != nil {
-		return
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if k, v, ok := strings.Cut(line, "="); ok {
-			t.Setenv(strings.TrimSpace(k), strings.TrimSpace(v))
-		}
-	}
-}
 
 // TestDiscovery_FindCameras connects to a real Frigate NVR and verifies
 // at least one camera is configured. Reads FRIGATE_URL from .env.local.

@@ -5,14 +5,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"sync"
 	"testing"
 	"time"
 
 	frigateapp "github.com/slidebolt/plugin-frigate/app"
 	domain "github.com/slidebolt/sb-domain"
-	testkit "github.com/slidebolt/sb-testkit"
 	storage "github.com/slidebolt/sb-storage-sdk"
+	testkit "github.com/slidebolt/sb-testkit"
 )
 
 func TestHelloManifest(t *testing.T) {
@@ -25,7 +24,8 @@ func TestHelloManifest(t *testing.T) {
 	}
 }
 
-func TestDiscoveryCreatesCameraAndChildEntities(t *testing.T) {
+func TestDiscoveryCreatesCameraScopedEntitiesWithoutRoot(t *testing.T) {
+	var eventsCalls int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/config":
@@ -45,27 +45,8 @@ func TestDiscoveryCreatesCameraAndChildEntities(t *testing.T) {
 				}
 			}`)
 		case "/api/events":
-			fmt.Fprintln(w, `[
-				{
-					"id": "evt-1",
-					"label": "person",
-					"camera": "front_door",
-					"start_time": 1710000000,
-					"has_clip": true,
-					"has_snapshot": true,
-					"data": {"type": "object", "score": 0.98}
-				},
-				{
-					"id": "evt-2",
-					"label": "dog",
-					"camera": "front_door",
-					"start_time": 1710000100,
-					"end_time": 1710000200,
-					"has_clip": false,
-					"has_snapshot": true,
-					"data": {"type": "object", "score": 0.88}
-				}
-			]`)
+			eventsCalls++
+			t.Fatalf("discovery must not call /api/events")
 		default:
 			http.NotFound(w, r)
 		}
@@ -90,7 +71,7 @@ func TestDiscoveryCreatesCameraAndChildEntities(t *testing.T) {
 
 	store := env.Storage()
 
-	camera := getEntity(t, store, frigateapp.PluginID, "front_door", "front_door")
+	camera := getEntity(t, store, frigateapp.PluginID, "front_door", "camera-state")
 	cameraState, ok := camera.State.(frigateapp.CameraState)
 	if !ok {
 		t.Fatalf("camera state type = %T, want CameraState", camera.State)
@@ -98,8 +79,11 @@ func TestDiscoveryCreatesCameraAndChildEntities(t *testing.T) {
 	if !cameraState.DetectEnabled || !cameraState.SnapshotsEnabled || cameraState.RecordEnabled {
 		t.Fatalf("unexpected camera state: %+v", cameraState)
 	}
-	if cameraState.LastEvent == nil || cameraState.LastEvent.ID != "evt-2" {
-		t.Fatalf("camera LastEvent = %+v, want evt-2", cameraState.LastEvent)
+	if cameraState.LastEvent != nil {
+		t.Fatalf("camera LastEvent = %+v, want nil until MQTT updates arrive", cameraState.LastEvent)
+	}
+	if _, err := store.Get(domain.EntityKey{Plugin: frigateapp.PluginID, DeviceID: "front_door", ID: "front_door"}); err == nil {
+		t.Fatal("unexpected legacy root camera entity plugin-frigate.front_door.front_door")
 	}
 
 	availability := getEntity(t, store, frigateapp.PluginID, "front_door", "availability")
@@ -130,8 +114,8 @@ func TestDiscoveryCreatesCameraAndChildEntities(t *testing.T) {
 	if !ok {
 		t.Fatalf("event state type = %T, want EventSensorState", personEvents.State)
 	}
-	if !personState.EventPresent || personState.LastEventID != "evt-1" {
-		t.Fatalf("unexpected person event state: %+v", personState)
+	if personState.EventPresent || personState.LastEventID != "" {
+		t.Fatalf("unexpected person event state before MQTT: %+v", personState)
 	}
 
 	allCount := getEntity(t, store, frigateapp.PluginID, "front_door", "status-all-count")
@@ -139,8 +123,8 @@ func TestDiscoveryCreatesCameraAndChildEntities(t *testing.T) {
 	if !ok {
 		t.Fatalf("count state type = %T, want StatusSensorState", allCount.State)
 	}
-	if countState.Count != 2 {
-		t.Fatalf("count = %d, want 2", countState.Count)
+	if countState.Count != 0 {
+		t.Fatalf("count = %d, want 0 before MQTT", countState.Count)
 	}
 
 	detect := getEntity(t, store, frigateapp.PluginID, "front_door", "status-detect")
@@ -152,37 +136,45 @@ func TestDiscoveryCreatesCameraAndChildEntities(t *testing.T) {
 		t.Fatalf("detect value = %q, want On", detectState.Value)
 	}
 
+	enableDetect := getEntity(t, store, frigateapp.PluginID, "front_door", "detect-enable")
+	if enableDetect.Type != "button" {
+		t.Fatalf("detect-enable type = %q, want button", enableDetect.Type)
+	}
+	if len(enableDetect.Commands) != 1 || enableDetect.Commands[0] != "frigate_camera_enable_detect" {
+		t.Fatalf("detect-enable commands = %v, want frigate_camera_enable_detect", enableDetect.Commands)
+	}
+
 	entries, err := store.Query(storage.Query{Pattern: frigateapp.PluginID + ".front_door.>"})
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
-	if len(entries) < 10 {
-		t.Fatalf("entity count = %d, want at least 10", len(entries))
+	if len(entries) < 16 {
+		t.Fatalf("entity count = %d, want at least 16", len(entries))
+	}
+	if eventsCalls != 0 {
+		t.Fatalf("/api/events calls = %d, want 0", eventsCalls)
 	}
 }
 
-func TestDiscoveryReconcilesNewCameraWithoutRestart(t *testing.T) {
-	var mu sync.RWMutex
-	cameras := map[string]any{
-		"front_door": map[string]any{
-			"name":      "front_door",
-			"enabled":   true,
-			"detect":    map[string]any{"enabled": true},
-			"motion":    map[string]any{"enabled": true},
-			"record":    map[string]any{"enabled": true},
-			"snapshots": map[string]any{"enabled": true},
-		},
-	}
-
+func TestMQTTUpdatesEventDerivedEntities(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/config":
-			mu.RLock()
-			payload := map[string]any{"cameras": cameras}
-			mu.RUnlock()
-			_ = json.NewEncoder(w).Encode(payload)
+			fmt.Fprintln(w, `{
+				"cameras": {
+					"front_door": {
+						"name": "front_door",
+						"enabled": true,
+						"detect": {"enabled": true},
+						"motion": {"enabled": true},
+						"record": {"enabled": false},
+						"snapshots": {"enabled": true},
+						"objects": {"track": ["person"]}
+					}
+				}
+			}`)
 		case "/api/events":
-			fmt.Fprintln(w, `[]`)
+			t.Fatalf("mqtt-driven runtime must not call /api/events")
 		default:
 			http.NotFound(w, r)
 		}
@@ -190,7 +182,6 @@ func TestDiscoveryReconcilesNewCameraWithoutRestart(t *testing.T) {
 	defer server.Close()
 
 	t.Setenv("FRIGATE_URL", server.URL)
-	t.Setenv("FRIGATE_TIMEOUT_MS", "200")
 
 	env := testkit.NewTestEnv(t)
 	env.Start("messenger")
@@ -205,35 +196,71 @@ func TestDiscoveryReconcilesNewCameraWithoutRestart(t *testing.T) {
 	defer app.OnShutdown()
 
 	store := env.Storage()
-	if _, err := store.Get(domain.EntityKey{Plugin: frigateapp.PluginID, DeviceID: "front_door", ID: "front_door"}); err != nil {
-		t.Fatalf("expected initial camera: %v", err)
-	}
 
-	mu.Lock()
-	cameras["garage"] = map[string]any{
-		"name":      "garage",
-		"enabled":   true,
-		"detect":    map[string]any{"enabled": true},
-		"motion":    map[string]any{"enabled": true},
-		"record":    map[string]any{"enabled": false},
-		"snapshots": map[string]any{"enabled": true},
-	}
-	mu.Unlock()
-
-	deadline := time.Now().Add(35 * time.Second)
-	for {
-		if _, err := store.Get(domain.EntityKey{Plugin: frigateapp.PluginID, DeviceID: "garage", ID: "garage"}); err == nil {
-			break
+	if err := app.HandleMQTTEvent([]byte(`{
+		"type":"new",
+		"after":{
+			"id":"evt-1",
+			"label":"person",
+			"camera":"front_door",
+			"start_time":1710000000,
+			"has_clip":true,
+			"has_snapshot":true,
+			"data":{"type":"object","score":0.98}
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for reconciled garage camera")
-		}
-		time.Sleep(500 * time.Millisecond)
+	}`)); err != nil {
+		t.Fatalf("HandleMQTTEvent(new): %v", err)
 	}
 
-	garage := getEntity(t, store, frigateapp.PluginID, "garage", "garage")
-	if garage.Type != "frigate_camera" {
-		t.Fatalf("garage type = %q", garage.Type)
+	camera := getEntity(t, store, frigateapp.PluginID, "front_door", "camera-state")
+	cameraState, ok := camera.State.(frigateapp.CameraState)
+	if !ok {
+		t.Fatalf("camera state type = %T, want CameraState", camera.State)
+	}
+	if cameraState.LastEvent == nil || cameraState.LastEvent.ID != "evt-1" {
+		t.Fatalf("camera LastEvent after MQTT = %+v, want evt-1", cameraState.LastEvent)
+	}
+
+	personEvents := getEntity(t, store, frigateapp.PluginID, "front_door", "event-person")
+	personState, ok := personEvents.State.(frigateapp.EventSensorState)
+	if !ok {
+		t.Fatalf("event state type = %T, want EventSensorState", personEvents.State)
+	}
+	if !personState.EventPresent || personState.LastEventID != "evt-1" {
+		t.Fatalf("unexpected person event state after MQTT: %+v", personState)
+	}
+
+	allCount := getEntity(t, store, frigateapp.PluginID, "front_door", "status-all-count")
+	countState, ok := allCount.State.(frigateapp.StatusSensorState)
+	if !ok {
+		t.Fatalf("count state type = %T, want StatusSensorState", allCount.State)
+	}
+	if countState.Count != 1 {
+		t.Fatalf("count after MQTT = %d, want 1", countState.Count)
+	}
+
+	allActive := getEntity(t, store, frigateapp.PluginID, "front_door", "status-all-active-count")
+	activeState, ok := allActive.State.(frigateapp.StatusSensorState)
+	if !ok {
+		t.Fatalf("active count state type = %T, want StatusSensorState", allActive.State)
+	}
+	if activeState.ActiveCount != 1 {
+		t.Fatalf("active count after MQTT = %d, want 1", activeState.ActiveCount)
+	}
+
+	occupancy := getEntity(t, store, frigateapp.PluginID, "front_door", "status-all-occupancy")
+	occupancyState, ok := occupancy.State.(frigateapp.StatusSensorState)
+	if !ok {
+		t.Fatalf("occupancy state type = %T, want StatusSensorState", occupancy.State)
+	}
+	if occupancyState.Occupancy != "Detected" {
+		t.Fatalf("occupancy after MQTT = %q, want Detected", occupancyState.Occupancy)
+	}
+}
+
+func TestReconcileIntervalIsTenMinutes(t *testing.T) {
+	if frigateapp.ReconcileInterval != 10*time.Minute {
+		t.Fatalf("reconcile interval = %v, want 10m", frigateapp.ReconcileInterval)
 	}
 }
 
