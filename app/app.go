@@ -1129,8 +1129,23 @@ func (a *App) saveEntityIfChanged(entity domain.Entity) (bool, error) {
 	}
 	return true, nil
 }
-func (a *App) deleteEntityByKey(key string) error {
-	return a.store.Delete(entityKey(key))
+func (a *App) saveDeviceIfChanged(device domain.Device) (bool, error) {
+	body, err := json.Marshal(device)
+	if err != nil {
+		return false, fmt.Errorf("marshal %s: %w", device.Key(), err)
+	}
+	current, err := a.store.Get(device)
+	if err == nil && len(current) > 0 && normalizedJSON(current) == normalizedJSON(body) {
+		return false, nil
+	}
+	if err := a.store.Save(device); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (a *App) deleteStorageKey(key string) error {
+	return a.store.Delete(rawKey(key))
 }
 
 func (a *App) desiredEntities(camera string, config CameraConfig) []domain.Entity {
@@ -1138,26 +1153,47 @@ func (a *App) desiredEntities(camera string, config CameraConfig) []domain.Entit
 	return a.childEntities(camera, config, runtime)
 }
 
+func (a *App) desiredDevice(camera string) domain.Device {
+	return domain.Device{
+		ID:     camera,
+		Plugin: PluginID,
+		Name:   camera,
+	}
+}
+
 func (a *App) syncCameraConfig(cameras map[string]CameraConfig) error {
-	desired := make(map[string]domain.Entity)
+	desiredDevices := make(map[string]domain.Device)
+	desiredEntities := make(map[string]domain.Entity)
+
 	cameraNames := make([]string, 0, len(cameras))
 	for name := range cameras {
 		cameraNames = append(cameraNames, name)
 	}
 	sort.Strings(cameraNames)
+
 	for _, name := range cameraNames {
 		config := cameras[name]
+		device := a.desiredDevice(name)
+		desiredDevices[device.Key()] = device
 		for _, entity := range a.desiredEntities(name, config) {
-			desired[entity.Key()] = entity
+			desiredEntities[entity.Key()] = entity
 		}
 	}
 
 	existing, err := a.store.Search(PluginID + ".>")
 	if err != nil {
-		return fmt.Errorf("search existing frigate entities: %w", err)
+		return fmt.Errorf("search existing frigate records: %w", err)
 	}
-	for _, key := range sortedKeys(desired) {
-		entity := desired[key]
+
+	// Parents before children: save devices, then entities.
+	for _, key := range sortedDeviceKeys(desiredDevices) {
+		device := desiredDevices[key]
+		if _, err := a.saveDeviceIfChanged(device); err != nil {
+			log.Printf("plugin-frigate: failed to save device %s: %v", key, err)
+		}
+	}
+	for _, key := range sortedEntityKeys(desiredEntities) {
+		entity := desiredEntities[key]
 		changed, err := a.saveEntityIfChanged(entity)
 		if err != nil {
 			log.Printf("plugin-frigate: failed to save entity %s: %v", key, err)
@@ -1171,17 +1207,20 @@ func (a *App) syncCameraConfig(cameras map[string]CameraConfig) error {
 	}
 
 	for _, entry := range existing {
-		if _, ok := desired[entry.Key]; ok {
+		if _, ok := desiredDevices[entry.Key]; ok {
 			continue
 		}
-		if err := a.deleteEntityByKey(entry.Key); err != nil {
-			log.Printf("plugin-frigate: failed to delete stale entity %s: %v", entry.Key, err)
+		if _, ok := desiredEntities[entry.Key]; ok {
+			continue
+		}
+		if err := a.deleteStorageKey(entry.Key); err != nil {
+			log.Printf("plugin-frigate: failed to delete stale record %s: %v", entry.Key, err)
 		}
 	}
 	return nil
 }
 
-func sortedKeys(m map[string]domain.Entity) []string {
+func sortedEntityKeys(m map[string]domain.Entity) []string {
 	keys := make([]string, 0, len(m))
 	for key := range m {
 		keys = append(keys, key)
@@ -1190,9 +1229,18 @@ func sortedKeys(m map[string]domain.Entity) []string {
 	return keys
 }
 
-type entityKey string
+func sortedDeviceKeys(m map[string]domain.Device) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
 
-func (k entityKey) Key() string { return string(k) }
+type rawKey string
+
+func (k rawKey) Key() string { return string(k) }
 
 func cloneRuntime(src *cameraRuntime) *cameraRuntime {
 	if src == nil {

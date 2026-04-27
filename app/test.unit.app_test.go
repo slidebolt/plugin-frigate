@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -258,10 +260,195 @@ func TestMQTTUpdatesEventDerivedEntities(t *testing.T) {
 	}
 }
 
+func TestDiscoveryCreatesDeviceRecord(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(singleCameraConfigHandler("front_door")))
+	defer server.Close()
+
+	t.Setenv("FRIGATE_URL", server.URL)
+
+	env := testkit.NewTestEnv(t)
+	env.Start("messenger")
+	env.Start("storage")
+
+	app := frigateapp.New()
+	if _, err := app.OnStart(map[string]json.RawMessage{
+		"messenger": env.MessengerPayload(),
+	}); err != nil {
+		t.Fatalf("OnStart: %v", err)
+	}
+	defer app.OnShutdown()
+
+	store := env.Storage()
+	device := getDevice(t, store, frigateapp.PluginID, "front_door")
+	if device.ID != "front_door" || device.Plugin != frigateapp.PluginID || device.Name != "front_door" {
+		t.Fatalf("device = %+v, want ID=front_door Plugin=%s Name=front_door", device, frigateapp.PluginID)
+	}
+	if len(device.Entities) != 0 {
+		t.Fatalf("device.Entities = %v, want empty", device.Entities)
+	}
+}
+
+func TestDiscoveryCreatesOneDevicePerCamera(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(multiCameraConfigHandler("front_door", "driveway", "garage")))
+	defer server.Close()
+
+	t.Setenv("FRIGATE_URL", server.URL)
+
+	env := testkit.NewTestEnv(t)
+	env.Start("messenger")
+	env.Start("storage")
+
+	app := frigateapp.New()
+	if _, err := app.OnStart(map[string]json.RawMessage{
+		"messenger": env.MessengerPayload(),
+	}); err != nil {
+		t.Fatalf("OnStart: %v", err)
+	}
+	defer app.OnShutdown()
+
+	store := env.Storage()
+	for _, id := range []string{"front_door", "driveway", "garage"} {
+		getDevice(t, store, frigateapp.PluginID, id)
+	}
+
+	entries, err := store.Search(frigateapp.PluginID + ".*")
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	deviceCount := 0
+	for _, e := range entries {
+		if strings.Count(e.Key, ".") == 1 {
+			deviceCount++
+		}
+	}
+	if deviceCount != 3 {
+		t.Fatalf("2-part device record count = %d, want 3", deviceCount)
+	}
+}
+
+func TestReconcileRemovesStaleCamera(t *testing.T) {
+	var cameras atomic.Pointer[[]string]
+	initial := []string{"front_door", "driveway", "garage"}
+	cameras.Store(&initial)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/config" {
+			http.NotFound(w, r)
+			return
+		}
+		multiCameraConfigHandler(*cameras.Load()...)(w, r)
+	}))
+	defer server.Close()
+
+	t.Setenv("FRIGATE_URL", server.URL)
+
+	env := testkit.NewTestEnv(t)
+	env.Start("messenger")
+	env.Start("storage")
+
+	app1 := frigateapp.New()
+	if _, err := app1.OnStart(map[string]json.RawMessage{
+		"messenger": env.MessengerPayload(),
+	}); err != nil {
+		t.Fatalf("first OnStart: %v", err)
+	}
+	app1.OnShutdown()
+
+	store := env.Storage()
+	getDevice(t, store, frigateapp.PluginID, "driveway")
+
+	reduced := []string{"front_door", "garage"}
+	cameras.Store(&reduced)
+
+	app2 := frigateapp.New()
+	if _, err := app2.OnStart(map[string]json.RawMessage{
+		"messenger": env.MessengerPayload(),
+	}); err != nil {
+		t.Fatalf("second OnStart: %v", err)
+	}
+	defer app2.OnShutdown()
+
+	if _, err := store.Get(domain.DeviceKey{Plugin: frigateapp.PluginID, ID: "driveway"}); err == nil {
+		t.Fatal("stale device plugin-frigate.driveway should have been deleted")
+	}
+	stale, err := store.Search(frigateapp.PluginID + ".driveway.>")
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(stale) != 0 {
+		t.Fatalf("stale driveway entities = %d, want 0", len(stale))
+	}
+
+	getDevice(t, store, frigateapp.PluginID, "front_door")
+	getDevice(t, store, frigateapp.PluginID, "garage")
+}
+
+func TestDeviceAndEntitiesCoexist(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(singleCameraConfigHandler("front_door")))
+	defer server.Close()
+
+	t.Setenv("FRIGATE_URL", server.URL)
+
+	env := testkit.NewTestEnv(t)
+	env.Start("messenger")
+	env.Start("storage")
+
+	app := frigateapp.New()
+	if _, err := app.OnStart(map[string]json.RawMessage{
+		"messenger": env.MessengerPayload(),
+	}); err != nil {
+		t.Fatalf("OnStart: %v", err)
+	}
+	defer app.OnShutdown()
+
+	store := env.Storage()
+	getDevice(t, store, frigateapp.PluginID, "front_door")
+	getEntity(t, store, frigateapp.PluginID, "front_door", "camera-state")
+}
+
 func TestReconcileIntervalIsTenMinutes(t *testing.T) {
 	if frigateapp.ReconcileInterval != 10*time.Minute {
 		t.Fatalf("reconcile interval = %v, want 10m", frigateapp.ReconcileInterval)
 	}
+}
+
+func singleCameraConfigHandler(name string) http.HandlerFunc {
+	return multiCameraConfigHandler(name)
+}
+
+func multiCameraConfigHandler(names ...string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/config" {
+			http.NotFound(w, r)
+			return
+		}
+		cams := make(map[string]any, len(names))
+		for _, n := range names {
+			cams[n] = map[string]any{
+				"name":      n,
+				"enabled":   true,
+				"detect":    map[string]any{"enabled": true},
+				"motion":    map[string]any{"enabled": true},
+				"record":    map[string]any{"enabled": false},
+				"snapshots": map[string]any{"enabled": true},
+				"objects":   map[string]any{"track": []string{"person"}},
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"cameras": cams})
+	}
+}
+
+func getDevice(t *testing.T, store storage.Storage, plugin, id string) domain.Device {
+	t.Helper()
+	raw, err := store.Get(domain.DeviceKey{Plugin: plugin, ID: id})
+	if err != nil {
+		t.Fatalf("Get device %s.%s: %v", plugin, id, err)
+	}
+	var device domain.Device
+	if err := json.Unmarshal(raw, &device); err != nil {
+		t.Fatalf("Unmarshal device %s.%s: %v", plugin, id, err)
+	}
+	return device
 }
 
 func getEntity(t *testing.T, store storage.Storage, plugin, deviceID, entityID string) domain.Entity {
