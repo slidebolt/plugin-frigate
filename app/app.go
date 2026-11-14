@@ -121,22 +121,6 @@ type EventData struct {
 	Box      []float64 `json:"box,omitempty"`
 }
 
-type CameraEnableDetect struct{}
-type CameraDisableDetect struct{}
-type CameraEnableRecord struct{}
-type CameraDisableRecord struct{}
-type CameraEnableSnapshots struct{}
-type CameraDisableSnapshots struct{}
-
-func init() {
-	domain.RegisterCommand("frigate_camera_enable_detect", CameraEnableDetect{})
-	domain.RegisterCommand("frigate_camera_disable_detect", CameraDisableDetect{})
-	domain.RegisterCommand("frigate_camera_enable_record", CameraEnableRecord{})
-	domain.RegisterCommand("frigate_camera_disable_record", CameraDisableRecord{})
-	domain.RegisterCommand("frigate_camera_enable_snapshots", CameraEnableSnapshots{})
-	domain.RegisterCommand("frigate_camera_disable_snapshots", CameraDisableSnapshots{})
-}
-
 type FrigateClient struct {
 	BaseURL    string
 	Username   string
@@ -312,16 +296,7 @@ func New() *App {
 }
 
 func (a *App) Hello() contract.HelloResponse {
-	definitions := contract.DescribePlugin("Frigate", "Discovers Frigate cameras, live media sources, events, configuration state, and controls.", "binary_sensor", "button", "camera", "event", "media_source", "sensor")
-	empty := `{"type":"object","additionalProperties":false}`
-	definitions.Commands = []contract.CommandDefinition{
-		contract.DescribeCommand("frigate_camera_enable_detect", "Enable detection", "Enables object detection for a camera.", empty),
-		contract.DescribeCommand("frigate_camera_disable_detect", "Disable detection", "Disables object detection for a camera.", empty),
-		contract.DescribeCommand("frigate_camera_enable_record", "Enable recording", "Enables continuous recording for a camera.", empty),
-		contract.DescribeCommand("frigate_camera_disable_record", "Disable recording", "Disables continuous recording for a camera.", empty),
-		contract.DescribeCommand("frigate_camera_enable_snapshots", "Enable snapshots", "Enables snapshot capture for a camera.", empty),
-		contract.DescribeCommand("frigate_camera_disable_snapshots", "Disable snapshots", "Disables snapshot capture for a camera.", empty),
-	}
+	definitions := contract.DescribePlugin("Frigate", "Discovers Frigate cameras, live media sources, events, configuration state, and controls.", "binary_sensor", "camera", "event", "media_source", "sensor", "switch")
 	return contract.HelloResponse{
 		ID:              PluginID,
 		Kind:            contract.KindPlugin,
@@ -372,6 +347,9 @@ func (a *App) OnStart(deps map[string]json.RawMessage) (json.RawMessage, error) 
 		return nil, fmt.Errorf("serve media provider: %w", err)
 	}
 	a.subs = append(a.subs, providerSubs...)
+	if err := a.msg.Flush(); err != nil {
+		return nil, fmt.Errorf("flush subscriptions: %w", err)
+	}
 
 	if a.client != nil {
 		a.ctx, a.cancel = context.WithCancel(context.Background())
@@ -507,21 +485,26 @@ func (a *App) reconcileCameras(ctx context.Context) {
 func (a *App) handleCommand(addr messenger.Address, cmd any) {
 	cameraID := addr.DeviceID
 
+	var enabled bool
 	switch cmd.(type) {
-	case CameraEnableDetect:
-		a.handleEnableDetect(cameraID, true)
-	case CameraDisableDetect:
-		a.handleEnableDetect(cameraID, false)
-	case CameraEnableRecord:
-		a.handleEnableRecord(cameraID, true)
-	case CameraDisableRecord:
-		a.handleEnableRecord(cameraID, false)
-	case CameraEnableSnapshots:
-		a.handleEnableSnapshots(cameraID, true)
-	case CameraDisableSnapshots:
-		a.handleEnableSnapshots(cameraID, false)
+	case domain.SwitchTurnOn:
+		enabled = true
+	case domain.SwitchTurnOff:
+		enabled = false
 	default:
-		log.Printf("plugin-frigate: unknown command %T for %s", cmd, addr.Key())
+		log.Printf("plugin-frigate: unsupported command %T for %s", cmd, addr.Key())
+		return
+	}
+
+	switch addr.EntityID {
+	case "detection":
+		a.handleEnableDetect(cameraID, enabled)
+	case "continuous-recording":
+		a.handleEnableRecord(cameraID, enabled)
+	case "snapshots":
+		a.handleEnableSnapshots(cameraID, enabled)
+	default:
+		log.Printf("plugin-frigate: switch command for unknown entity %s", addr.Key())
 	}
 }
 
@@ -546,7 +529,7 @@ func (a *App) handleEnableDetect(cameraID string, enabled bool) {
 		s.DetectionEnabled = enabled
 		s.LastError = ""
 	})
-	a.updateStatusEntity(cameraID, "status-detect", onOff(enabled))
+	a.updateSwitchEntity(cameraID, "detection", enabled)
 }
 
 func (a *App) handleEnableRecord(cameraID string, enabled bool) {
@@ -570,7 +553,7 @@ func (a *App) handleEnableRecord(cameraID string, enabled bool) {
 		s.IsRecording = enabled
 		s.LastError = ""
 	})
-	a.updateStatusEntity(cameraID, "status-record", onOff(enabled))
+	a.updateSwitchEntity(cameraID, "continuous-recording", enabled)
 }
 
 func (a *App) handleEnableSnapshots(cameraID string, enabled bool) {
@@ -594,7 +577,7 @@ func (a *App) handleEnableSnapshots(cameraID string, enabled bool) {
 		s.SnapshotsEnabled = enabled
 		s.LastError = ""
 	})
-	a.updateStatusEntity(cameraID, "status-snapshots", onOff(enabled))
+	a.updateSwitchEntity(cameraID, "snapshots", enabled)
 }
 
 func (a *App) updateCameraState(cameraID string, update func(*domain.Camera)) {
@@ -624,21 +607,21 @@ func (a *App) updateCameraState(cameraID string, update func(*domain.Camera)) {
 	}
 }
 
-func (a *App) updateStatusEntity(cameraID, entityID, value string) {
+func (a *App) updateSwitchEntity(cameraID, entityID string, enabled bool) {
 	eKey := domain.EntityKey{Plugin: PluginID, DeviceID: cameraID, ID: entityID}
 	raw, err := a.store.Get(eKey)
 	if err != nil {
-		log.Printf("plugin-frigate: failed to get status %s for %s: %v", entityID, cameraID, err)
+		log.Printf("plugin-frigate: failed to get switch %s for %s: %v", entityID, cameraID, err)
 		return
 	}
 	var entity domain.Entity
 	if err := json.Unmarshal(raw, &entity); err != nil {
-		log.Printf("plugin-frigate: failed to unmarshal status %s for %s: %v", entityID, cameraID, err)
+		log.Printf("plugin-frigate: failed to unmarshal switch %s for %s: %v", entityID, cameraID, err)
 		return
 	}
-	entity.State = domain.BinarySensor{On: value == "ON", DeviceClass: "configuration"}
+	entity.State = domain.Switch{Power: enabled}
 	if _, err := a.saveEntityIfChanged(entity); err != nil {
-		log.Printf("plugin-frigate: failed to update status %s for %s: %v", entityID, cameraID, err)
+		log.Printf("plugin-frigate: failed to update switch %s for %s: %v", entityID, cameraID, err)
 	}
 }
 
@@ -714,7 +697,6 @@ func (a *App) childEntities(camera string, config CameraConfig, runtime *cameraR
 	entities = append(entities, a.eventEntities(camera, runtime)...)
 	entities = append(entities, a.summaryEntities(camera, runtime)...)
 	entities = append(entities, a.configEntities(camera, config)...)
-	entities = append(entities, a.commandEntities(camera)...)
 	return entities
 }
 
@@ -791,12 +773,13 @@ func (a *App) summaryEntities(camera string, runtime *cameraRuntime) []domain.En
 func (a *App) configEntities(camera string, config CameraConfig) []domain.Entity {
 	return []domain.Entity{
 		{
-			ID:       "status-detect",
+			ID:       "detection",
 			Plugin:   PluginID,
 			DeviceID: camera,
-			Type:     "binary_sensor",
-			Name:     "Detect",
-			State:    domain.BinarySensor{On: config.Detect.Enabled, DeviceClass: "configuration"},
+			Type:     "switch",
+			Name:     "Object Detection",
+			Commands: []string{"switch_turn_on", "switch_turn_off"},
+			State:    domain.Switch{Power: config.Detect.Enabled},
 		},
 		{
 			ID:       "status-motion",
@@ -807,20 +790,22 @@ func (a *App) configEntities(camera string, config CameraConfig) []domain.Entity
 			State:    domain.BinarySensor{On: config.Motion.Enabled, DeviceClass: "configuration"},
 		},
 		{
-			ID:       "status-record",
+			ID:       "continuous-recording",
 			Plugin:   PluginID,
 			DeviceID: camera,
-			Type:     "binary_sensor",
-			Name:     "Record",
-			State:    domain.BinarySensor{On: config.Record.Enabled, DeviceClass: "configuration"},
+			Type:     "switch",
+			Name:     "Continuous Recording",
+			Commands: []string{"switch_turn_on", "switch_turn_off"},
+			State:    domain.Switch{Power: config.Record.Enabled},
 		},
 		{
-			ID:       "status-snapshots",
+			ID:       "snapshots",
 			Plugin:   PluginID,
 			DeviceID: camera,
-			Type:     "binary_sensor",
-			Name:     "Snapshots",
-			State:    domain.BinarySensor{On: config.Snap.Enabled, DeviceClass: "configuration"},
+			Type:     "switch",
+			Name:     "Snapshot Capture",
+			Commands: []string{"switch_turn_on", "switch_turn_off"},
+			State:    domain.Switch{Power: config.Snap.Enabled},
 		},
 		{
 			ID:       "status-review-alerts",
@@ -837,65 +822,6 @@ func (a *App) configEntities(camera string, config CameraConfig) []domain.Entity
 			Type:     "binary_sensor",
 			Name:     "Review Detections",
 			State:    domain.BinarySensor{On: config.Review.Detections.Enabled, DeviceClass: "configuration"},
-		},
-	}
-}
-
-func (a *App) commandEntities(camera string) []domain.Entity {
-	return []domain.Entity{
-		{
-			ID:       "detect-enable",
-			Plugin:   PluginID,
-			DeviceID: camera,
-			Type:     "button",
-			Name:     "Enable Detect",
-			Commands: []string{"frigate_camera_enable_detect"},
-			State:    domain.Button{},
-		},
-		{
-			ID:       "detect-disable",
-			Plugin:   PluginID,
-			DeviceID: camera,
-			Type:     "button",
-			Name:     "Disable Detect",
-			Commands: []string{"frigate_camera_disable_detect"},
-			State:    domain.Button{},
-		},
-		{
-			ID:       "record-enable",
-			Plugin:   PluginID,
-			DeviceID: camera,
-			Type:     "button",
-			Name:     "Enable Record",
-			Commands: []string{"frigate_camera_enable_record"},
-			State:    domain.Button{},
-		},
-		{
-			ID:       "record-disable",
-			Plugin:   PluginID,
-			DeviceID: camera,
-			Type:     "button",
-			Name:     "Disable Record",
-			Commands: []string{"frigate_camera_disable_record"},
-			State:    domain.Button{},
-		},
-		{
-			ID:       "snapshots-enable",
-			Plugin:   PluginID,
-			DeviceID: camera,
-			Type:     "button",
-			Name:     "Enable Snapshots",
-			Commands: []string{"frigate_camera_enable_snapshots"},
-			State:    domain.Button{},
-		},
-		{
-			ID:       "snapshots-disable",
-			Plugin:   PluginID,
-			DeviceID: camera,
-			Type:     "button",
-			Name:     "Disable Snapshots",
-			Commands: []string{"frigate_camera_disable_snapshots"},
-			State:    domain.Button{},
 		},
 	}
 }
@@ -1191,11 +1117,4 @@ func sanitizeID(s string) string {
 		b.WriteByte('-')
 	}
 	return strings.Trim(b.String(), "-")
-}
-
-func onOff(v bool) string {
-	if v {
-		return "On"
-	}
-	return "Off"
 }

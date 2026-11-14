@@ -13,6 +13,7 @@ import (
 	frigateapp "github.com/slidebolt/plugin-frigate/app"
 	domain "github.com/slidebolt/sb-domain"
 	media "github.com/slidebolt/sb-media-sdk"
+	messenger "github.com/slidebolt/sb-messenger-sdk"
 	storage "github.com/slidebolt/sb-storage-sdk"
 	testkit "github.com/slidebolt/sb-testkit"
 )
@@ -24,6 +25,15 @@ func TestHelloManifest(t *testing.T) {
 	}
 	if len(got.DependsOn) != 3 {
 		t.Fatalf("Hello().DependsOn = %v, want messenger+storage+media", got.DependsOn)
+	}
+	if got.Definitions == nil {
+		t.Fatal("Hello().Definitions is nil")
+	}
+	if len(got.Definitions.Commands) != 0 {
+		t.Fatalf("Hello().Definitions.Commands = %v, want no provider-specific commands", got.Definitions.Commands)
+	}
+	if strings.Join(got.Definitions.EntityTypes, ",") != "binary_sensor,camera,event,media_source,sensor,switch" {
+		t.Fatalf("Hello().Definitions.EntityTypes = %v", got.Definitions.EntityTypes)
 	}
 }
 
@@ -128,32 +138,91 @@ func TestDiscoveryCreatesCameraScopedEntitiesWithoutRoot(t *testing.T) {
 		t.Fatalf("count = %v, want 0 before MQTT", countState.Value)
 	}
 
-	detect := getEntity(t, store, frigateapp.PluginID, "front_door", "status-detect")
-	detectState, ok := detect.State.(domain.BinarySensor)
+	detect := getEntity(t, store, frigateapp.PluginID, "front_door", "detection")
+	detectState, ok := detect.State.(domain.Switch)
 	if !ok {
-		t.Fatalf("detect state type = %T, want domain.BinarySensor", detect.State)
+		t.Fatalf("detection state type = %T, want domain.Switch", detect.State)
 	}
-	if !detectState.On {
-		t.Fatal("detect should be on")
+	if !detectState.Power {
+		t.Fatal("detection should be on")
 	}
-
-	enableDetect := getEntity(t, store, frigateapp.PluginID, "front_door", "detect-enable")
-	if enableDetect.Type != "button" {
-		t.Fatalf("detect-enable type = %q, want button", enableDetect.Type)
+	if detect.Type != "switch" {
+		t.Fatalf("detection type = %q, want switch", detect.Type)
 	}
-	if len(enableDetect.Commands) != 1 || enableDetect.Commands[0] != "frigate_camera_enable_detect" {
-		t.Fatalf("detect-enable commands = %v, want frigate_camera_enable_detect", enableDetect.Commands)
+	if strings.Join(detect.Commands, ",") != "switch_turn_on,switch_turn_off" {
+		t.Fatalf("detection commands = %v, want generic switch commands", detect.Commands)
 	}
 
 	entries, err := store.Query(storage.Query{Pattern: frigateapp.PluginID + ".front_door.>"})
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
-	if len(entries) < 16 {
-		t.Fatalf("entity count = %d, want at least 16", len(entries))
+	if len(entries) < 10 {
+		t.Fatalf("entity count = %d, want at least 10", len(entries))
+	}
+	for _, oldID := range []string{"status-detect", "status-record", "status-snapshots", "detect-enable", "detect-disable", "record-enable", "record-disable", "snapshots-enable", "snapshots-disable"} {
+		if _, err := store.Get(domain.EntityKey{Plugin: frigateapp.PluginID, DeviceID: "front_door", ID: oldID}); err == nil {
+			t.Fatalf("obsolete entity %s still exists", oldID)
+		}
 	}
 	if eventsCalls != 0 {
 		t.Fatalf("/api/events calls = %d, want 0", eventsCalls)
+	}
+}
+
+func TestGenericSwitchCommandsMapToFrigateAPI(t *testing.T) {
+	requests := make(chan string, 3)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/config" {
+			singleCameraConfigHandler("front_door")(w, r)
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.NotFound(w, r)
+			return
+		}
+		requests <- r.URL.Path
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	t.Setenv("FRIGATE_URL", server.URL)
+	env := testkit.NewTestEnv(t)
+	env.Start("messenger")
+	env.Start("storage")
+
+	app := frigateapp.New()
+	if _, err := app.OnStart(map[string]json.RawMessage{"messenger": env.MessengerPayload()}); err != nil {
+		t.Fatalf("OnStart: %v", err)
+	}
+	defer app.OnShutdown()
+
+	sender := messenger.NewCommands(env.Messenger(), domain.LookupCommand)
+	tests := []struct {
+		entityID string
+		command  messenger.Action
+		wantPath string
+	}{
+		{entityID: "detection", command: domain.SwitchTurnOff{}, wantPath: "/api/front_door/detect/false"},
+		{entityID: "continuous-recording", command: domain.SwitchTurnOn{}, wantPath: "/api/front_door/record/true"},
+		{entityID: "snapshots", command: domain.SwitchTurnOff{}, wantPath: "/api/front_door/snapshots/false"},
+	}
+	for _, test := range tests {
+		target := getEntity(t, env.Storage(), frigateapp.PluginID, "front_door", test.entityID)
+		if err := sender.Send(target, test.command); err != nil {
+			t.Fatalf("send %s: %v", test.entityID, err)
+		}
+		if err := env.Messenger().Flush(); err != nil {
+			t.Fatalf("flush %s: %v", test.entityID, err)
+		}
+		select {
+		case got := <-requests:
+			if got != test.wantPath {
+				t.Fatalf("%s request = %q, want %q", test.entityID, got, test.wantPath)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for %s request", test.entityID)
+		}
 	}
 }
 
