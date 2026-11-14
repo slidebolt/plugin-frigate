@@ -111,13 +111,12 @@ func (a *App) syncRuntimeEntities(cameraID string) error {
 		return fmt.Errorf("unmarshal camera %s: %w", cameraID, err)
 	}
 
-	state := ConvertToCameraState(cameraEntity.State)
+	state, ok := cameraEntity.State.(domain.Camera)
+	if !ok {
+		return fmt.Errorf("camera %s has invalid state type %T", cameraID, cameraEntity.State)
+	}
 	runtime := a.runtimeSnapshot(cameraID)
 	state.LastError = runtime.LastError
-	if runtime.LastEvent != nil {
-		e := *runtime.LastEvent
-		state.LastEvent = &e
-	}
 	cameraEntity.State = state
 	if _, err := a.saveEntityIfChanged(cameraEntity); err != nil {
 		return fmt.Errorf("save camera %s: %w", cameraID, err)

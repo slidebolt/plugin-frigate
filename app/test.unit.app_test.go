@@ -74,68 +74,64 @@ func TestDiscoveryCreatesCameraScopedEntitiesWithoutRoot(t *testing.T) {
 	store := env.Storage()
 
 	camera := getEntity(t, store, frigateapp.PluginID, "front_door", "camera-state")
-	cameraState, ok := camera.State.(frigateapp.CameraState)
+	cameraState, ok := camera.State.(domain.Camera)
 	if !ok {
-		t.Fatalf("camera state type = %T, want CameraState", camera.State)
+		t.Fatalf("camera state type = %T, want domain.Camera", camera.State)
 	}
-	if !cameraState.DetectEnabled || !cameraState.SnapshotsEnabled || cameraState.RecordEnabled {
+	if !cameraState.DetectionEnabled || !cameraState.SnapshotsEnabled || cameraState.IsRecording {
 		t.Fatalf("unexpected camera state: %+v", cameraState)
-	}
-	if cameraState.LastEvent != nil {
-		t.Fatalf("camera LastEvent = %+v, want nil until MQTT updates arrive", cameraState.LastEvent)
 	}
 	if _, err := store.Get(domain.EntityKey{Plugin: frigateapp.PluginID, DeviceID: "front_door", ID: "front_door"}); err == nil {
 		t.Fatal("unexpected legacy root camera entity plugin-frigate.front_door.front_door")
 	}
 
-	availability := getEntity(t, store, frigateapp.PluginID, "front_door", "availability")
-	if availability.Type != "frigate_availability" {
-		t.Fatalf("availability type = %q", availability.Type)
+	if _, err := store.Get(domain.EntityKey{Plugin: frigateapp.PluginID, DeviceID: "front_door", ID: "availability"}); err == nil {
+		t.Fatal("availability must be represented by camera.available, not a provider-specific entity")
 	}
 
 	mainStream := getEntity(t, store, frigateapp.PluginID, "front_door", "stream-main")
-	streamState, ok := mainStream.State.(frigateapp.StreamState)
+	streamState, ok := mainStream.State.(domain.MediaStream)
 	if !ok {
-		t.Fatalf("stream state type = %T, want StreamState", mainStream.State)
+		t.Fatalf("stream state type = %T, want domain.MediaStream", mainStream.State)
 	}
 	if streamState.URL != "https://go2rtc.example/stream.html?src=front_door" {
 		t.Fatalf("stream URL = %q", streamState.URL)
 	}
 
 	snapshot := getEntity(t, store, frigateapp.PluginID, "front_door", "image-latest")
-	imageState, ok := snapshot.State.(frigateapp.ImageState)
+	imageState, ok := snapshot.State.(domain.MediaStream)
 	if !ok {
-		t.Fatalf("image state type = %T, want ImageState", snapshot.State)
+		t.Fatalf("image state type = %T, want domain.MediaStream", snapshot.State)
 	}
 	if imageState.URL != server.URL+"/api/front_door/latest.jpg" {
 		t.Fatalf("snapshot URL = %q", imageState.URL)
 	}
 
 	personEvents := getEntity(t, store, frigateapp.PluginID, "front_door", "event-person")
-	personState, ok := personEvents.State.(frigateapp.EventSensorState)
+	personState, ok := personEvents.State.(domain.Event)
 	if !ok {
-		t.Fatalf("event state type = %T, want EventSensorState", personEvents.State)
+		t.Fatalf("event state type = %T, want domain.Event", personEvents.State)
 	}
-	if personState.EventPresent || personState.LastEventID != "" {
+	if personState.Active || personState.LastEventID != "" {
 		t.Fatalf("unexpected person event state before MQTT: %+v", personState)
 	}
 
 	allCount := getEntity(t, store, frigateapp.PluginID, "front_door", "status-all-count")
-	countState, ok := allCount.State.(frigateapp.StatusSensorState)
+	countState, ok := allCount.State.(domain.Sensor)
 	if !ok {
-		t.Fatalf("count state type = %T, want StatusSensorState", allCount.State)
+		t.Fatalf("count state type = %T, want domain.Sensor", allCount.State)
 	}
-	if countState.Count != 0 {
-		t.Fatalf("count = %d, want 0 before MQTT", countState.Count)
+	if countState.Value != float64(0) {
+		t.Fatalf("count = %v, want 0 before MQTT", countState.Value)
 	}
 
 	detect := getEntity(t, store, frigateapp.PluginID, "front_door", "status-detect")
-	detectState, ok := detect.State.(frigateapp.StatusSensorState)
+	detectState, ok := detect.State.(domain.BinarySensor)
 	if !ok {
-		t.Fatalf("detect state type = %T, want StatusSensorState", detect.State)
+		t.Fatalf("detect state type = %T, want domain.BinarySensor", detect.State)
 	}
-	if detectState.Value != "On" {
-		t.Fatalf("detect value = %q, want On", detectState.Value)
+	if !detectState.On {
+		t.Fatal("detect should be on")
 	}
 
 	enableDetect := getEntity(t, store, frigateapp.PluginID, "front_door", "detect-enable")
@@ -215,48 +211,48 @@ func TestMQTTUpdatesEventDerivedEntities(t *testing.T) {
 	}
 
 	camera := getEntity(t, store, frigateapp.PluginID, "front_door", "camera-state")
-	cameraState, ok := camera.State.(frigateapp.CameraState)
+	cameraState, ok := camera.State.(domain.Camera)
 	if !ok {
-		t.Fatalf("camera state type = %T, want CameraState", camera.State)
+		t.Fatalf("camera state type = %T, want domain.Camera", camera.State)
 	}
-	if cameraState.LastEvent == nil || cameraState.LastEvent.ID != "evt-1" {
-		t.Fatalf("camera LastEvent after MQTT = %+v, want evt-1", cameraState.LastEvent)
+	if !cameraState.Available {
+		t.Fatal("camera should remain available after MQTT event")
 	}
 
 	personEvents := getEntity(t, store, frigateapp.PluginID, "front_door", "event-person")
-	personState, ok := personEvents.State.(frigateapp.EventSensorState)
+	personState, ok := personEvents.State.(domain.Event)
 	if !ok {
 		t.Fatalf("event state type = %T, want EventSensorState", personEvents.State)
 	}
-	if !personState.EventPresent || personState.LastEventID != "evt-1" {
+	if !personState.Active || personState.LastEventID != "evt-1" {
 		t.Fatalf("unexpected person event state after MQTT: %+v", personState)
 	}
 
 	allCount := getEntity(t, store, frigateapp.PluginID, "front_door", "status-all-count")
-	countState, ok := allCount.State.(frigateapp.StatusSensorState)
+	countState, ok := allCount.State.(domain.Sensor)
 	if !ok {
 		t.Fatalf("count state type = %T, want StatusSensorState", allCount.State)
 	}
-	if countState.Count != 1 {
-		t.Fatalf("count after MQTT = %d, want 1", countState.Count)
+	if countState.Value != float64(1) {
+		t.Fatalf("count after MQTT = %v, want 1", countState.Value)
 	}
 
 	allActive := getEntity(t, store, frigateapp.PluginID, "front_door", "status-all-active-count")
-	activeState, ok := allActive.State.(frigateapp.StatusSensorState)
+	activeState, ok := allActive.State.(domain.Sensor)
 	if !ok {
 		t.Fatalf("active count state type = %T, want StatusSensorState", allActive.State)
 	}
-	if activeState.ActiveCount != 1 {
-		t.Fatalf("active count after MQTT = %d, want 1", activeState.ActiveCount)
+	if activeState.Value != float64(1) {
+		t.Fatalf("active count after MQTT = %v, want 1", activeState.Value)
 	}
 
 	occupancy := getEntity(t, store, frigateapp.PluginID, "front_door", "status-all-occupancy")
-	occupancyState, ok := occupancy.State.(frigateapp.StatusSensorState)
+	occupancyState, ok := occupancy.State.(domain.BinarySensor)
 	if !ok {
 		t.Fatalf("occupancy state type = %T, want StatusSensorState", occupancy.State)
 	}
-	if occupancyState.Occupancy != "Detected" {
-		t.Fatalf("occupancy after MQTT = %q, want Detected", occupancyState.Occupancy)
+	if !occupancyState.On {
+		t.Fatal("occupancy should be on")
 	}
 }
 

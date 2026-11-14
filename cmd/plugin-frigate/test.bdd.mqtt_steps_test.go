@@ -18,10 +18,10 @@ func (c *bddCtx) aCameraEntityNamed(key, name string) error {
 		return err
 	}
 
-	state := app.CameraState{
-		Connected:     true,
-		Enabled:       true,
-		DetectEnabled: true,
+	state := domain.Camera{
+		Available:        true,
+		Enabled:          true,
+		DetectionEnabled: true,
 	}
 
 	rawState, _ := json.Marshal(state)
@@ -30,7 +30,7 @@ func (c *bddCtx) aCameraEntityNamed(key, name string) error {
 		ID:       id,
 		Plugin:   plug,
 		DeviceID: dev,
-		Type:     "frigate_camera_status",
+		Type:     "camera",
 		Name:     name,
 		State:    json.RawMessage(rawState),
 	})
@@ -54,12 +54,12 @@ func (c *bddCtx) theCameraFieldShouldBeUpdated(field string) error {
 		return fmt.Errorf("no entity was retrieved previously")
 	}
 
-	var state app.CameraState
+	var state domain.Camera
 
 	// The domain.Entity decoder might yield map[string]interface{} for unknown types
 	// Or it might be json.RawMessage if we bypassed decoder
 	switch v := c.lastEntity.State.(type) {
-	case app.CameraState:
+	case domain.Camera:
 		state = v
 	case json.RawMessage:
 		if err := json.Unmarshal(v, &state); err != nil {
@@ -73,8 +73,8 @@ func (c *bddCtx) theCameraFieldShouldBeUpdated(field string) error {
 		}
 	}
 
-	if state.LastEvent == nil {
-		return fmt.Errorf("expected LastEvent to be set, but it was nil")
+	if !state.Available {
+		return fmt.Errorf("expected camera to remain available")
 	}
 	return nil
 }

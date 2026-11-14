@@ -120,52 +120,6 @@ type EventData struct {
 	Box      []float64 `json:"box,omitempty"`
 }
 
-type CameraState struct {
-	Connected        bool     `json:"connected"`
-	Enabled          bool     `json:"enabled"`
-	DetectEnabled    bool     `json:"detect_enabled"`
-	RecordEnabled    bool     `json:"record_enabled"`
-	SnapshotsEnabled bool     `json:"snapshots_enabled"`
-	Zones            []string `json:"zones"`
-	LastEvent        *Event   `json:"last_event,omitempty"`
-	LastError        string   `json:"last_error,omitempty"`
-}
-
-type AvailabilityState struct {
-	Available bool `json:"available"`
-}
-
-type StreamState struct {
-	URL    string `json:"url"`
-	Format string `json:"format,omitempty"`
-	Kind   string `json:"kind,omitempty"`
-	Online bool   `json:"online"`
-}
-
-type ImageState struct {
-	URL    string `json:"url"`
-	Format string `json:"format,omitempty"`
-	Online bool   `json:"online"`
-}
-
-type EventSensorState struct {
-	Camera       string `json:"camera"`
-	Label        string `json:"label"`
-	LastEventID  string `json:"last_event_id,omitempty"`
-	LastEventAt  string `json:"last_event_time,omitempty"`
-	HasSnapshot  bool   `json:"has_snapshot"`
-	HasClip      bool   `json:"has_clip"`
-	EventPresent bool   `json:"event_present"`
-}
-
-type StatusSensorState struct {
-	Value       string `json:"value,omitempty"`
-	Count       int    `json:"count,omitempty"`
-	ActiveCount int    `json:"active_count,omitempty"`
-	Occupancy   string `json:"occupancy,omitempty"`
-	Available   bool   `json:"available"`
-}
-
 type CameraEnableDetect struct{}
 type CameraDisableDetect struct{}
 type CameraEnableRecord struct{}
@@ -174,12 +128,6 @@ type CameraEnableSnapshots struct{}
 type CameraDisableSnapshots struct{}
 
 func init() {
-	domain.Register("frigate_camera_status", CameraState{})
-	domain.Register("frigate_availability", AvailabilityState{})
-	domain.Register("frigate_stream", StreamState{})
-	domain.Register("frigate_image", ImageState{})
-	domain.Register("frigate_event_sensor", EventSensorState{})
-	domain.Register("frigate_status_sensor", StatusSensorState{})
 	domain.RegisterCommand("frigate_camera_enable_detect", CameraEnableDetect{})
 	domain.RegisterCommand("frigate_camera_disable_detect", CameraDisableDetect{})
 	domain.RegisterCommand("frigate_camera_enable_record", CameraEnableRecord{})
@@ -567,7 +515,7 @@ func (a *App) handleEnableDetect(cameraID string, enabled bool) {
 	if err := a.client.SetDetect(ctx, cameraID, enabled); err != nil {
 		log.Printf("plugin-frigate: failed to set detect for %s: %v", cameraID, err)
 		a.setRuntimeLastError(cameraID, err.Error())
-		a.updateCameraState(cameraID, func(s *CameraState) {
+		a.updateCameraState(cameraID, func(s *domain.Camera) {
 			s.LastError = err.Error()
 		})
 		return
@@ -577,8 +525,8 @@ func (a *App) handleEnableDetect(cameraID string, enabled bool) {
 		map[bool]string{true: "enabled", false: "disabled"}[enabled], cameraID)
 
 	a.setRuntimeLastError(cameraID, "")
-	a.updateCameraState(cameraID, func(s *CameraState) {
-		s.DetectEnabled = enabled
+	a.updateCameraState(cameraID, func(s *domain.Camera) {
+		s.DetectionEnabled = enabled
 		s.LastError = ""
 	})
 	a.updateStatusEntity(cameraID, "status-detect", onOff(enabled))
@@ -591,7 +539,7 @@ func (a *App) handleEnableRecord(cameraID string, enabled bool) {
 	if err := a.client.SetRecord(ctx, cameraID, enabled); err != nil {
 		log.Printf("plugin-frigate: failed to set record for %s: %v", cameraID, err)
 		a.setRuntimeLastError(cameraID, err.Error())
-		a.updateCameraState(cameraID, func(s *CameraState) {
+		a.updateCameraState(cameraID, func(s *domain.Camera) {
 			s.LastError = err.Error()
 		})
 		return
@@ -601,8 +549,8 @@ func (a *App) handleEnableRecord(cameraID string, enabled bool) {
 		map[bool]string{true: "enabled", false: "disabled"}[enabled], cameraID)
 
 	a.setRuntimeLastError(cameraID, "")
-	a.updateCameraState(cameraID, func(s *CameraState) {
-		s.RecordEnabled = enabled
+	a.updateCameraState(cameraID, func(s *domain.Camera) {
+		s.IsRecording = enabled
 		s.LastError = ""
 	})
 	a.updateStatusEntity(cameraID, "status-record", onOff(enabled))
@@ -615,7 +563,7 @@ func (a *App) handleEnableSnapshots(cameraID string, enabled bool) {
 	if err := a.client.SetSnapshots(ctx, cameraID, enabled); err != nil {
 		log.Printf("plugin-frigate: failed to set snapshots for %s: %v", cameraID, err)
 		a.setRuntimeLastError(cameraID, err.Error())
-		a.updateCameraState(cameraID, func(s *CameraState) {
+		a.updateCameraState(cameraID, func(s *domain.Camera) {
 			s.LastError = err.Error()
 		})
 		return
@@ -625,14 +573,14 @@ func (a *App) handleEnableSnapshots(cameraID string, enabled bool) {
 		map[bool]string{true: "enabled", false: "disabled"}[enabled], cameraID)
 
 	a.setRuntimeLastError(cameraID, "")
-	a.updateCameraState(cameraID, func(s *CameraState) {
+	a.updateCameraState(cameraID, func(s *domain.Camera) {
 		s.SnapshotsEnabled = enabled
 		s.LastError = ""
 	})
 	a.updateStatusEntity(cameraID, "status-snapshots", onOff(enabled))
 }
 
-func (a *App) updateCameraState(cameraID string, update func(*CameraState)) {
+func (a *App) updateCameraState(cameraID string, update func(*domain.Camera)) {
 	eKey := domain.EntityKey{Plugin: PluginID, DeviceID: cameraID, ID: "camera-state"}
 	raw, err := a.store.Get(eKey)
 	if err != nil {
@@ -646,7 +594,11 @@ func (a *App) updateCameraState(cameraID string, update func(*CameraState)) {
 		return
 	}
 
-	state := ConvertToCameraState(entity.State)
+	state, ok := entity.State.(domain.Camera)
+	if !ok {
+		log.Printf("plugin-frigate: camera %s has invalid state type %T", cameraID, entity.State)
+		return
+	}
 	update(&state)
 	entity.State = state
 
@@ -667,12 +619,7 @@ func (a *App) updateStatusEntity(cameraID, entityID, value string) {
 		log.Printf("plugin-frigate: failed to unmarshal status %s for %s: %v", entityID, cameraID, err)
 		return
 	}
-	state := StatusSensorState{Value: value, Available: true}
-	if current, ok := entity.State.(StatusSensorState); ok {
-		state = current
-		state.Value = value
-	}
-	entity.State = state
+	entity.State = domain.BinarySensor{On: value == "ON", DeviceClass: "configuration"}
 	if _, err := a.saveEntityIfChanged(entity); err != nil {
 		log.Printf("plugin-frigate: failed to update status %s for %s: %v", entityID, cameraID, err)
 	}
@@ -695,100 +642,51 @@ func (a *App) setRuntimeLastError(cameraID, message string) {
 	runtime.LastError = message
 }
 
-func ConvertToCameraState(v any) CameraState {
-	state := CameraState{}
-
-	switch s := v.(type) {
-	case CameraState:
-		return s
-	case map[string]interface{}:
-		if v, ok := s["connected"].(bool); ok {
-			state.Connected = v
-		}
-		if v, ok := s["enabled"].(bool); ok {
-			state.Enabled = v
-		}
-		if v, ok := s["detect_enabled"].(bool); ok {
-			state.DetectEnabled = v
-		}
-		if v, ok := s["record_enabled"].(bool); ok {
-			state.RecordEnabled = v
-		}
-		if v, ok := s["snapshots_enabled"].(bool); ok {
-			state.SnapshotsEnabled = v
-		}
-		if v, ok := s["last_error"].(string); ok {
-			state.LastError = v
-		}
-		if v, ok := s["zones"].([]interface{}); ok {
-			state.Zones = make([]string, 0, len(v))
-			for _, z := range v {
-				if zs, ok := z.(string); ok {
-					state.Zones = append(state.Zones, zs)
-				}
-			}
-		}
-	default:
-		data, _ := json.Marshal(v)
-		_ = json.Unmarshal(data, &state)
-	}
-
-	return state
-}
-
-func (a *App) cameraState(config CameraConfig, runtime *cameraRuntime) CameraState {
+func (a *App) cameraState(camera string, config CameraConfig, runtime *cameraRuntime) domain.Camera {
 	zones := make([]string, 0, len(config.Zones))
 	for zoneName := range config.Zones {
 		zones = append(zones, zoneName)
 	}
 	sort.Strings(zones)
 
-	state := CameraState{
-		Connected:        true,
+	state := domain.Camera{
+		Available:        true,
 		Enabled:          config.Enabled,
-		DetectEnabled:    config.Detect.Enabled,
-		RecordEnabled:    config.Record.Enabled,
+		DetectionEnabled: config.Detect.Enabled,
+		MotionDetection:  config.Motion.Enabled,
+		IsRecording:      config.Record.Enabled,
 		SnapshotsEnabled: config.Snap.Enabled,
 		Zones:            zones,
+		SnapshotURL:      a.apiURL(fmt.Sprintf("/api/%s/latest.jpg", camera)),
 	}
 	if runtime != nil {
 		state.LastError = runtime.LastError
-		if runtime.LastEvent != nil {
-			event := *runtime.LastEvent
-			state.LastEvent = &event
-		}
 	}
 	return state
 }
 
 func (a *App) childEntities(camera string, config CameraConfig, runtime *cameraRuntime) []domain.Entity {
+	cameraState := a.cameraState(camera, config, runtime)
 	entities := []domain.Entity{
 		{
 			ID:       "camera-state",
 			Plugin:   PluginID,
 			DeviceID: camera,
-			Type:     "frigate_camera_status",
+			Type:     "camera",
 			Name:     "Camera State",
-			State:    a.cameraState(config, runtime),
-		},
-		{
-			ID:       "availability",
-			Plugin:   PluginID,
-			DeviceID: camera,
-			Type:     "frigate_availability",
-			Name:     "Availability",
-			State:    AvailabilityState{Available: true},
+			State:    cameraState,
 		},
 		{
 			ID:       "image-latest",
 			Plugin:   PluginID,
 			DeviceID: camera,
-			Type:     "frigate_image",
+			Type:     "media_stream",
 			Name:     "Latest Snapshot",
-			State: ImageState{
+			State: domain.MediaStream{
 				URL:    a.apiURL(fmt.Sprintf("/api/%s/latest.jpg", camera)),
 				Format: "jpeg",
-				Online: true,
+				Kind:   "image",
+				Status: "live",
 			},
 		},
 	}
@@ -798,13 +696,13 @@ func (a *App) childEntities(camera string, config CameraConfig, runtime *cameraR
 			ID:       spec.ID,
 			Plugin:   PluginID,
 			DeviceID: camera,
-			Type:     "frigate_stream",
+			Type:     "media_stream",
 			Name:     spec.Name,
-			State: StreamState{
+			State: domain.MediaStream{
 				URL:    a.go2rtcURL(spec.Path, camera),
 				Format: spec.Format,
 				Kind:   spec.Kind,
-				Online: true,
+				Status: "live",
 			},
 		})
 	}
@@ -822,27 +720,25 @@ func (a *App) eventEntities(camera string, runtime *cameraRuntime) []domain.Enti
 	for _, label := range labels {
 		item := runtime.label(label)
 		activeCount := len(item.Active)
-		state := EventSensorState{
-			Camera:       camera,
-			Label:        label,
-			HasSnapshot:  false,
-			HasClip:      false,
-			EventPresent: false,
+		state := domain.Event{
+			EventTypes: []string{label}, DeviceClass: "camera_event",
+			Attributes: map[string]any{"camera": camera, "label": label, "hasSnapshot": false, "hasClip": false},
 		}
 		if item.LastEvent != nil {
 			state.LastEventID = item.LastEvent.ID
-			state.HasSnapshot = item.LastEvent.HasSnapshot
-			state.HasClip = item.LastEvent.HasClip
-			state.EventPresent = activeCount > 0
+			state.Attributes["hasSnapshot"] = item.LastEvent.HasSnapshot
+			state.Attributes["hasClip"] = item.LastEvent.HasClip
+			state.Active = activeCount > 0
 			if item.LastEvent.StartTime > 0 {
-				state.LastEventAt = time.Unix(int64(item.LastEvent.StartTime), 0).UTC().Format(time.RFC3339)
+				at := time.Unix(int64(item.LastEvent.StartTime), 0).UTC()
+				state.LastEventAt = &at
 			}
 		}
 		entities = append(entities, domain.Entity{
 			ID:       "event-" + sanitizeID(label),
 			Plugin:   PluginID,
 			DeviceID: camera,
-			Type:     "frigate_event_sensor",
+			Type:     "event",
 			Name:     strings.Title(label) + " Events",
 			State:    state,
 		})
@@ -860,47 +756,30 @@ func (a *App) summaryEntities(camera string, runtime *cameraRuntime) []domain.En
 			allActive += len(item.Active)
 		}
 	}
-	occupancy := "Clear"
-	if allActive > 0 {
-		occupancy = "Detected"
-	}
-
 	return []domain.Entity{
 		{
 			ID:       "status-all-count",
 			Plugin:   PluginID,
 			DeviceID: camera,
-			Type:     "frigate_status_sensor",
+			Type:     "sensor",
 			Name:     "All Count",
-			State: StatusSensorState{
-				Value:     fmt.Sprintf("%d objects", allCount),
-				Count:     allCount,
-				Available: true,
-			},
+			State:    domain.Sensor{Value: allCount, Unit: "objects", DeviceClass: "count"},
 		},
 		{
 			ID:       "status-all-active-count",
 			Plugin:   PluginID,
 			DeviceID: camera,
-			Type:     "frigate_status_sensor",
+			Type:     "sensor",
 			Name:     "All Active Count",
-			State: StatusSensorState{
-				Value:       fmt.Sprintf("%d objects", allActive),
-				ActiveCount: allActive,
-				Available:   true,
-			},
+			State:    domain.Sensor{Value: allActive, Unit: "objects", DeviceClass: "count"},
 		},
 		{
 			ID:       "status-all-occupancy",
 			Plugin:   PluginID,
 			DeviceID: camera,
-			Type:     "frigate_status_sensor",
+			Type:     "binary_sensor",
 			Name:     "All Occupancy",
-			State: StatusSensorState{
-				Value:     occupancy,
-				Occupancy: occupancy,
-				Available: true,
-			},
+			State:    domain.BinarySensor{On: allActive > 0, DeviceClass: "occupancy"},
 		},
 	}
 }
@@ -911,49 +790,49 @@ func (a *App) configEntities(camera string, config CameraConfig) []domain.Entity
 			ID:       "status-detect",
 			Plugin:   PluginID,
 			DeviceID: camera,
-			Type:     "frigate_status_sensor",
+			Type:     "binary_sensor",
 			Name:     "Detect",
-			State:    StatusSensorState{Value: onOff(config.Detect.Enabled), Available: true},
+			State:    domain.BinarySensor{On: config.Detect.Enabled, DeviceClass: "configuration"},
 		},
 		{
 			ID:       "status-motion",
 			Plugin:   PluginID,
 			DeviceID: camera,
-			Type:     "frigate_status_sensor",
+			Type:     "binary_sensor",
 			Name:     "Motion",
-			State:    StatusSensorState{Value: onOff(config.Motion.Enabled), Available: true},
+			State:    domain.BinarySensor{On: config.Motion.Enabled, DeviceClass: "configuration"},
 		},
 		{
 			ID:       "status-record",
 			Plugin:   PluginID,
 			DeviceID: camera,
-			Type:     "frigate_status_sensor",
+			Type:     "binary_sensor",
 			Name:     "Record",
-			State:    StatusSensorState{Value: onOff(config.Record.Enabled), Available: true},
+			State:    domain.BinarySensor{On: config.Record.Enabled, DeviceClass: "configuration"},
 		},
 		{
 			ID:       "status-snapshots",
 			Plugin:   PluginID,
 			DeviceID: camera,
-			Type:     "frigate_status_sensor",
+			Type:     "binary_sensor",
 			Name:     "Snapshots",
-			State:    StatusSensorState{Value: onOff(config.Snap.Enabled), Available: true},
+			State:    domain.BinarySensor{On: config.Snap.Enabled, DeviceClass: "configuration"},
 		},
 		{
 			ID:       "status-review-alerts",
 			Plugin:   PluginID,
 			DeviceID: camera,
-			Type:     "frigate_status_sensor",
+			Type:     "binary_sensor",
 			Name:     "Review Alerts",
-			State:    StatusSensorState{Value: onOff(config.Review.Alerts.Enabled), Available: true},
+			State:    domain.BinarySensor{On: config.Review.Alerts.Enabled, DeviceClass: "configuration"},
 		},
 		{
 			ID:       "status-review-detections",
 			Plugin:   PluginID,
 			DeviceID: camera,
-			Type:     "frigate_status_sensor",
+			Type:     "binary_sensor",
 			Name:     "Review Detections",
-			State:    StatusSensorState{Value: onOff(config.Review.Detections.Enabled), Available: true},
+			State:    domain.BinarySensor{On: config.Review.Detections.Enabled, DeviceClass: "configuration"},
 		},
 	}
 }
@@ -1200,9 +1079,9 @@ func (a *App) syncCameraConfig(cameras map[string]CameraConfig) error {
 			continue
 		}
 		if changed && entity.ID == "camera-state" {
-			state := entity.State.(CameraState)
+			state := entity.State.(domain.Camera)
 			log.Printf("plugin-frigate: synced camera %s (enabled=%v, detect=%v)",
-				entity.DeviceID, state.Enabled, state.DetectEnabled)
+				entity.DeviceID, state.Enabled, state.DetectionEnabled)
 		}
 	}
 
