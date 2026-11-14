@@ -12,6 +12,7 @@ import (
 
 	frigateapp "github.com/slidebolt/plugin-frigate/app"
 	domain "github.com/slidebolt/sb-domain"
+	media "github.com/slidebolt/sb-media-sdk"
 	storage "github.com/slidebolt/sb-storage-sdk"
 	testkit "github.com/slidebolt/sb-testkit"
 )
@@ -21,8 +22,8 @@ func TestHelloManifest(t *testing.T) {
 	if got.ID != frigateapp.PluginID {
 		t.Fatalf("Hello().ID = %q, want %q", got.ID, frigateapp.PluginID)
 	}
-	if len(got.DependsOn) != 2 {
-		t.Fatalf("Hello().DependsOn = %v, want messenger+storage", got.DependsOn)
+	if len(got.DependsOn) != 3 {
+		t.Fatalf("Hello().DependsOn = %v, want messenger+storage+media", got.DependsOn)
 	}
 }
 
@@ -90,21 +91,23 @@ func TestDiscoveryCreatesCameraScopedEntitiesWithoutRoot(t *testing.T) {
 	}
 
 	mainStream := getEntity(t, store, frigateapp.PluginID, "front_door", "stream-main")
-	streamState, ok := mainStream.State.(domain.MediaStream)
+	streamState, ok := mainStream.State.(domain.MediaSource)
 	if !ok {
-		t.Fatalf("stream state type = %T, want domain.MediaStream", mainStream.State)
+		t.Fatalf("stream state type = %T, want domain.MediaSource", mainStream.State)
 	}
 	if streamState.URL != "https://go2rtc.example/stream.html?src=front_door" {
 		t.Fatalf("stream URL = %q", streamState.URL)
 	}
-
-	snapshot := getEntity(t, store, frigateapp.PluginID, "front_door", "image-latest")
-	imageState, ok := snapshot.State.(domain.MediaStream)
-	if !ok {
-		t.Fatalf("image state type = %T, want domain.MediaStream", snapshot.State)
+	resolved, err := media.NewClient(env.Messenger()).Resolve(frigateapp.PluginID, media.ResolveRequest{Source: domain.PlayableSource{Kind: "live", Entity: mainStream.Key()}})
+	if err != nil || resolved.Error != "" {
+		t.Fatalf("resolve stream: reply=%+v err=%v", resolved, err)
 	}
-	if imageState.URL != server.URL+"/api/front_door/latest.jpg" {
-		t.Fatalf("snapshot URL = %q", imageState.URL)
+	if resolved.URL != streamState.URL || resolved.Format != "html" {
+		t.Fatalf("resolved stream = %+v", resolved)
+	}
+
+	if _, err := store.Get(domain.EntityKey{Plugin: frigateapp.PluginID, DeviceID: "front_door", ID: "image-latest"}); err == nil {
+		t.Fatal("snapshots are camera metadata, not standalone media entities")
 	}
 
 	personEvents := getEntity(t, store, frigateapp.PluginID, "front_door", "event-person")

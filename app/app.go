@@ -26,6 +26,7 @@ import (
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	contract "github.com/slidebolt/sb-contract"
 	domain "github.com/slidebolt/sb-domain"
+	media "github.com/slidebolt/sb-media-sdk"
 	messenger "github.com/slidebolt/sb-messenger-sdk"
 	storage "github.com/slidebolt/sb-storage-sdk"
 )
@@ -311,7 +312,7 @@ func New() *App {
 }
 
 func (a *App) Hello() contract.HelloResponse {
-	definitions := contract.DescribePlugin("Frigate", "Discovers Frigate cameras, streams, events, configuration state, and controls.", "binary_sensor", "button", "camera", "event", "media_stream", "sensor")
+	definitions := contract.DescribePlugin("Frigate", "Discovers Frigate cameras, live media sources, events, configuration state, and controls.", "binary_sensor", "button", "camera", "event", "media_source", "sensor")
 	empty := `{"type":"object","additionalProperties":false}`
 	definitions.Commands = []contract.CommandDefinition{
 		contract.DescribeCommand("frigate_camera_enable_detect", "Enable detection", "Enables object detection for a camera.", empty),
@@ -326,7 +327,7 @@ func (a *App) Hello() contract.HelloResponse {
 		Kind:            contract.KindPlugin,
 		ContractVersion: contract.ContractVersion,
 		Definitions:     definitions,
-		DependsOn:       []string{"messenger", "storage"},
+		DependsOn:       []string{"messenger", "storage", "media"},
 	}
 }
 
@@ -366,6 +367,11 @@ func (a *App) OnStart(deps map[string]json.RawMessage) (json.RawMessage, error) 
 		return nil, fmt.Errorf("subscribe commands: %w", err)
 	}
 	a.subs = append(a.subs, sub)
+	providerSubs, err := media.ServeProvider(msg, PluginID, a)
+	if err != nil {
+		return nil, fmt.Errorf("serve media provider: %w", err)
+	}
+	a.subs = append(a.subs, providerSubs...)
 
 	if a.client != nil {
 		a.ctx, a.cancel = context.WithCancel(context.Background())
@@ -687,19 +693,6 @@ func (a *App) childEntities(camera string, config CameraConfig, runtime *cameraR
 			Name:     "Camera State",
 			State:    cameraState,
 		},
-		{
-			ID:       "image-latest",
-			Plugin:   PluginID,
-			DeviceID: camera,
-			Type:     "media_stream",
-			Name:     "Latest Snapshot",
-			State: domain.MediaStream{
-				URL:    a.apiURL(fmt.Sprintf("/api/%s/latest.jpg", camera)),
-				Format: "jpeg",
-				Kind:   "image",
-				Status: "live",
-			},
-		},
 	}
 
 	for _, spec := range streamSpecs() {
@@ -707,13 +700,13 @@ func (a *App) childEntities(camera string, config CameraConfig, runtime *cameraR
 			ID:       spec.ID,
 			Plugin:   PluginID,
 			DeviceID: camera,
-			Type:     "media_stream",
+			Type:     "media_source",
 			Name:     spec.Name,
-			State: domain.MediaStream{
-				URL:    a.go2rtcURL(spec.Path, camera),
-				Format: spec.Format,
-				Kind:   spec.Kind,
-				Status: "live",
+			State: domain.MediaSource{
+				URL:       a.go2rtcURL(spec.Path, camera),
+				Format:    spec.Format,
+				Kind:      spec.Kind,
+				Available: true,
 			},
 		})
 	}
