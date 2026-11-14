@@ -311,10 +311,21 @@ func New() *App {
 }
 
 func (a *App) Hello() contract.HelloResponse {
+	definitions := contract.DescribePlugin("Frigate", "Discovers Frigate cameras, streams, events, configuration state, and controls.", "binary_sensor", "button", "camera", "event", "media_stream", "sensor")
+	empty := `{"type":"object","additionalProperties":false}`
+	definitions.Commands = []contract.CommandDefinition{
+		contract.DescribeCommand("frigate_camera_enable_detect", "Enable detection", "Enables object detection for a camera.", empty),
+		contract.DescribeCommand("frigate_camera_disable_detect", "Disable detection", "Disables object detection for a camera.", empty),
+		contract.DescribeCommand("frigate_camera_enable_record", "Enable recording", "Enables continuous recording for a camera.", empty),
+		contract.DescribeCommand("frigate_camera_disable_record", "Disable recording", "Disables continuous recording for a camera.", empty),
+		contract.DescribeCommand("frigate_camera_enable_snapshots", "Enable snapshots", "Enables snapshot capture for a camera.", empty),
+		contract.DescribeCommand("frigate_camera_disable_snapshots", "Disable snapshots", "Disables snapshot capture for a camera.", empty),
+	}
 	return contract.HelloResponse{
 		ID:              PluginID,
 		Kind:            contract.KindPlugin,
 		ContractVersion: contract.ContractVersion,
+		Definitions:     definitions,
 		DependsOn:       []string{"messenger", "storage"},
 	}
 }
