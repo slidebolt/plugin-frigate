@@ -121,8 +121,8 @@ github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec/go.mod h1:qq
 github.com/robfig/cron/v3 v3.0.1 h1:WdRxkvbJztn8LMz/QEvLN5sBU+xKpSqwwUO1Pjr4qDs=
 github.com/robfig/cron/v3 v3.0.1/go.mod h1:eQICP3HwyT7UooqI/z+Ov+PtYAWygg1TEWWzGIFLtro=
 github.com/russross/blackfriday/v2 v2.1.0/go.mod h1:+Rmxgy9KzJVeS9/2gXHxylqXiyQDYRxCVz55jmeOWTM=
-github.com/slidebolt/sb-contract v1.0.11 h1:2QOofsWhm/n2V6qEb3LjZgK47H0uMIaNQxxQ7kLM0wg=
-github.com/slidebolt/sb-contract v1.0.11/go.mod h1:nG2ebwepjRdd2t6cA0VFV34FuWJUF7DQrqcVVxDsza8=
+github.com/slidebolt/sb-contract v1.0.12 h1:n3B+PelUvlft2elju76KoNnL8g06Hu41AgxW8i+eyZY=
+github.com/slidebolt/sb-contract v1.0.12/go.mod h1:nG2ebwepjRdd2t6cA0VFV34FuWJUF7DQrqcVVxDsza8=
 github.com/slidebolt/sb-domain v1.0.24 h1:P8DKmory5ue5axeTPRWsvna5uhKPnxRzhBpq9w4Q/kM=
 github.com/slidebolt/sb-domain v1.0.24/go.mod h1:F3tFWsZ4jqqHpeAWlXS1/fpsjMmN0WtcbCiTcKwfh9Y=
 github.com/slidebolt/sb-logging v1.0.7 h1:Hadw3JZaDz/P6ywcIQrSgaWEyW2QMXpCN1iN3CllSHc=
@@ -133,8 +133,8 @@ github.com/slidebolt/sb-media-sdk v1.0.5 h1:qzaHpUSwwg/w+yl3kXzR3x6x6R5syfTy3S01
 github.com/slidebolt/sb-media-sdk v1.0.5/go.mod h1:bN5HHkbaZ+WPBfB1ymn8L7jCGPr29Kb7oMNHtdNYSBA=
 github.com/slidebolt/sb-messenger-sdk v1.0.9 h1:lDYUqkm21xf4VE69Z2SiLnfp9k975ZxhP7waVmq4OPA=
 github.com/slidebolt/sb-messenger-sdk v1.0.9/go.mod h1:yJxHiUgqcO/TUj9yiPkVyTwrN0/3BBy6HD17TdWPCEA=
-github.com/slidebolt/sb-runtime v1.0.8 h1:lfki9WaCi+HoQ5WGcQGrSuJMP5YUtZaL3JZkXFbiiwg=
-github.com/slidebolt/sb-runtime v1.0.8/go.mod h1:qV6WB+4oU1TGRr/z/jhXD0IhLx5JbbLIxWCQ7CM8kuw=
+github.com/slidebolt/sb-runtime v1.0.9 h1:aiBZbJ1FRCBvMk/eAlQtgP0afZkZY6lZS8cWWnynytk=
+github.com/slidebolt/sb-runtime v1.0.9/go.mod h1:TzCCLv/gJUSbRoQCKMa6xO8B5VW0Oy6pHEl4I7JLhAk=
 github.com/slidebolt/sb-scheduler v0.2.1 h1:3tyHaGeRPvvSUFdyz7KqmG7sNOBXgpucTtV8igA7ejM=
 github.com/slidebolt/sb-scheduler v0.2.1/go.mod h1:rAcOshL9ddlPzlAjkpY4Ca7uJy3P0qbgBKu0XL858DA=
 github.com/slidebolt/sb-scheduler-sdk v0.2.0 h1:RIfyFTQnYI5myfpNbVfgZv0UcdPteCx2zBKEQmBajQ8=

@@ -28,10 +28,17 @@ import (
 	domain "github.com/slidebolt/sb-domain"
 	media "github.com/slidebolt/sb-media-sdk"
 	messenger "github.com/slidebolt/sb-messenger-sdk"
+	runtime "github.com/slidebolt/sb-runtime"
 	storage "github.com/slidebolt/sb-storage-sdk"
 )
 
 const PluginID = "plugin-frigate"
+
+const (
+	frigateAPIResource  = "frigate-api"
+	go2rtcResource      = "frigate-go2rtc"
+	frigateMQTTResource = "frigate-mqtt"
+)
 
 type FrigateConfig struct {
 	URL       string     `json:"url"`
@@ -265,6 +272,8 @@ type App struct {
 	mu         sync.Mutex
 	runtime    map[string]*cameraRuntime
 	newTicker  func(time.Duration) *time.Ticker
+	reporter   runtime.ResourceReporter
+	mqttReady  chan error
 }
 
 type labelRuntime struct {
@@ -297,34 +306,42 @@ func New() *App {
 
 func (a *App) Hello() contract.HelloResponse {
 	definitions := contract.DescribePlugin("Frigate", "Discovers Frigate cameras, live media sources, events, configuration state, and controls.", "binary_sensor", "camera", "event", "media_source", "sensor", "switch")
+	setup := &contract.SetupDefinition{
+		Mode:     contract.SetupSelectable,
+		Category: "Cameras",
+		Fields: []contract.SetupField{
+			{Key: "url", Environment: "FRIGATE_URL", Name: "Frigate URL", Description: "Base URL of the Frigate HTTP API.", Control: contract.SetupText, Format: "uri", Required: true},
+			{Key: "go2rtc_url", Environment: "FRIGATE_GO2RTC_URL", Name: "go2rtc URL", Description: "Optional base URL used to expose Frigate live streams.", Control: contract.SetupText, Format: "uri"},
+			{Key: "username", Environment: "FRIGATE_USERNAME", Name: "Username", Description: "Optional Frigate HTTP username.", Control: contract.SetupText},
+			{Key: "password", Environment: "FRIGATE_PASSWORD", Name: "Password", Description: "Optional Frigate HTTP password.", Control: contract.SetupSecret, Sensitive: true},
+			{Key: "timeout_ms", Environment: "FRIGATE_TIMEOUT_MS", Name: "HTTP timeout", Description: "Frigate request timeout in milliseconds.", Control: contract.SetupText, Format: "integer", Advanced: true, Default: json.RawMessage(`"30000"`)},
+			{Key: "mqtt_host", Environment: "FRIGATE_MQTT_HOST", Name: "MQTT host", Description: "Optional MQTT broker host for real-time Frigate events.", Control: contract.SetupText},
+			{Key: "mqtt_port", Environment: "FRIGATE_MQTT_PORT", Name: "MQTT port", Description: "MQTT broker port.", Control: contract.SetupText, Format: "integer", Advanced: true, Default: json.RawMessage(`"1883"`)},
+			{Key: "mqtt_user", Environment: "FRIGATE_MQTT_USER", Name: "MQTT username", Description: "Optional MQTT broker username.", Control: contract.SetupText},
+			{Key: "mqtt_password", Environment: "FRIGATE_MQTT_PASSWORD", Name: "MQTT password", Description: "Optional MQTT broker password.", Control: contract.SetupSecret, Sensitive: true},
+			{Key: "mqtt_topic_prefix", Environment: "FRIGATE_MQTT_TOPIC_PREFIX", Name: "MQTT topic prefix", Description: "Frigate MQTT topic prefix.", Control: contract.SetupText, Advanced: true, Default: json.RawMessage(`"frigate"`)},
+		},
+		Constraints: []contract.SetupConstraint{
+			{Kind: "all_or_none", Fields: []string{"username", "password"}},
+			{Kind: "all_or_none", Fields: []string{"mqtt_user", "mqtt_password"}},
+		},
+		Resources: []contract.ExternalResourceDefinition{
+			{ID: frigateAPIResource, Kind: contract.ExternalResourceService, Name: "Frigate API", Description: "Supplies camera configuration, state, snapshots, and controls.", Fields: []string{"url", "username", "password", "timeout_ms"}, Activation: contract.ResourceActivation{Mode: contract.ResourceActivationAlways}},
+			{ID: go2rtcResource, Kind: contract.ExternalResourceService, Name: "Frigate go2rtc", Description: "Supplies live camera streams exposed by Frigate.", Fields: []string{"go2rtc_url"}, Activation: contract.ResourceActivation{Mode: contract.ResourceActivationConfigured, Fields: []string{"go2rtc_url"}}},
+			{ID: frigateMQTTResource, Kind: contract.ExternalResourceService, Name: "Frigate MQTT broker", Description: "Supplies real-time Frigate event notifications.", Fields: []string{"mqtt_host", "mqtt_port", "mqtt_user", "mqtt_password", "mqtt_topic_prefix"}, Activation: contract.ResourceActivation{Mode: contract.ResourceActivationConfigured, Fields: []string{"mqtt_host"}}},
+		},
+	}
 	return contract.HelloResponse{
 		ID:              PluginID,
 		Kind:            contract.KindPlugin,
 		ContractVersion: contract.ContractVersion,
 		Definitions:     definitions,
 		DependsOn:       []string{"messenger", "storage", "media"},
-		Setup: &contract.SetupDefinition{
-			Mode:     contract.SetupSelectable,
-			Category: "Cameras",
-			Fields: []contract.SetupField{
-				{Key: "url", Environment: "FRIGATE_URL", Name: "Frigate URL", Description: "Base URL of the Frigate HTTP API.", Control: contract.SetupText, Format: "uri", Required: true},
-				{Key: "go2rtc_url", Environment: "FRIGATE_GO2RTC_URL", Name: "go2rtc URL", Description: "Optional base URL used to expose Frigate live streams.", Control: contract.SetupText, Format: "uri"},
-				{Key: "username", Environment: "FRIGATE_USERNAME", Name: "Username", Description: "Optional Frigate HTTP username.", Control: contract.SetupText},
-				{Key: "password", Environment: "FRIGATE_PASSWORD", Name: "Password", Description: "Optional Frigate HTTP password.", Control: contract.SetupSecret, Sensitive: true},
-				{Key: "timeout_ms", Environment: "FRIGATE_TIMEOUT_MS", Name: "HTTP timeout", Description: "Frigate request timeout in milliseconds.", Control: contract.SetupText, Format: "integer", Advanced: true, Default: json.RawMessage(`"30000"`)},
-				{Key: "mqtt_host", Environment: "FRIGATE_MQTT_HOST", Name: "MQTT host", Description: "Optional MQTT broker host for real-time Frigate events.", Control: contract.SetupText},
-				{Key: "mqtt_port", Environment: "FRIGATE_MQTT_PORT", Name: "MQTT port", Description: "MQTT broker port.", Control: contract.SetupText, Format: "integer", Advanced: true, Default: json.RawMessage(`"1883"`)},
-				{Key: "mqtt_user", Environment: "FRIGATE_MQTT_USER", Name: "MQTT username", Description: "Optional MQTT broker username.", Control: contract.SetupText},
-				{Key: "mqtt_password", Environment: "FRIGATE_MQTT_PASSWORD", Name: "MQTT password", Description: "Optional MQTT broker password.", Control: contract.SetupSecret, Sensitive: true},
-				{Key: "mqtt_topic_prefix", Environment: "FRIGATE_MQTT_TOPIC_PREFIX", Name: "MQTT topic prefix", Description: "Frigate MQTT topic prefix.", Control: contract.SetupText, Advanced: true, Default: json.RawMessage(`"frigate"`)},
-			},
-			Constraints: []contract.SetupConstraint{
-				{Kind: "all_or_none", Fields: []string{"username", "password"}},
-				{Kind: "all_or_none", Fields: []string{"mqtt_user", "mqtt_password"}},
-			},
-		},
+		Setup:           setup,
 	}
 }
+
+func (a *App) SetResourceReporter(reporter runtime.ResourceReporter) { a.reporter = reporter }
 
 func (a *App) OnStart(deps map[string]json.RawMessage) (json.RawMessage, error) {
 	msg, err := messenger.Connect(deps)
@@ -340,20 +357,36 @@ func (a *App) OnStart(deps map[string]json.RawMessage) (json.RawMessage, error) 
 	a.store = storeClient
 
 	if err := a.loadConfig(); err != nil {
-		log.Printf("plugin-frigate: warning: could not load config: %v", err)
+		a.closeDependencies()
+		return nil, fmt.Errorf("load Frigate config: %w", err)
 	}
-
-	if a.config.URL != "" {
-		timeout := a.config.Timeout
-		if timeout == 0 {
-			timeout = 30000
+	if strings.TrimSpace(a.config.URL) == "" {
+		err := fmt.Errorf("FRIGATE_URL is required")
+		a.resourceDegraded(frigateAPIResource, "api_unavailable", err)
+		a.closeDependencies()
+		return nil, err
+	}
+	a.client = NewFrigateClient(a.config.URL, a.config.Username, a.config.Password, time.Duration(a.config.Timeout)*time.Millisecond)
+	if err := a.discoverCameras(); err != nil {
+		a.resourceDegraded(frigateAPIResource, "api_unavailable", err)
+		a.closeDependencies()
+		return nil, err
+	}
+	a.resourceReady(frigateAPIResource)
+	if a.config.Go2RTCURL != "" {
+		if err := a.checkGo2RTC(); err != nil {
+			a.resourceDegraded(go2rtcResource, "go2rtc_unavailable", err)
+			a.closeDependencies()
+			return nil, err
 		}
-		a.client = NewFrigateClient(
-			a.config.URL,
-			a.config.Username,
-			a.config.Password,
-			time.Duration(timeout)*time.Millisecond,
-		)
+		a.resourceReady(go2rtcResource)
+	}
+	if a.config.MQTT.Host != "" {
+		if err := a.connectMQTT(); err != nil {
+			a.resourceDegraded(frigateMQTTResource, "mqtt_unavailable", err)
+			a.closeDependencies()
+			return nil, err
+		}
 	}
 
 	a.cmds = messenger.NewCommands(msg, domain.LookupCommand)
@@ -370,50 +403,23 @@ func (a *App) OnStart(deps map[string]json.RawMessage) (json.RawMessage, error) 
 	if err := a.msg.Flush(); err != nil {
 		return nil, fmt.Errorf("flush subscriptions: %w", err)
 	}
-
-	if a.client != nil {
-		a.ctx, a.cancel = context.WithCancel(context.Background())
-		if err := a.discoverCameras(); err != nil {
-			log.Printf("plugin-frigate: camera discovery error: %v", err)
-		}
-		go a.reconcileCameras(a.ctx)
-
-		// Initialize MQTT if configured
-		if a.config.MQTT.Host != "" {
-			opts := mqtt.NewClientOptions()
-			brokerURL := fmt.Sprintf("tcp://%s:%s", a.config.MQTT.Host, a.config.MQTT.Port)
-			if a.config.MQTT.Port == "" {
-				brokerURL = fmt.Sprintf("tcp://%s:1883", a.config.MQTT.Host)
-			}
-			opts.AddBroker(brokerURL)
-			if a.config.MQTT.User != "" {
-				opts.SetUsername(a.config.MQTT.User)
-			}
-			if a.config.MQTT.Password != "" {
-				opts.SetPassword(a.config.MQTT.Password)
-			}
-			opts.SetClientID(PluginID + "-" + fmt.Sprintf("%d", time.Now().UnixNano()))
-
-			a.mqttClient = mqtt.NewClient(opts)
-			if token := a.mqttClient.Connect(); token.Wait() && token.Error() != nil {
-				log.Printf("plugin-frigate: failed to connect to MQTT: %v", token.Error())
-			} else {
-				topic := a.config.MQTT.TopicPrefix + "/events"
-				if token := a.mqttClient.Subscribe(topic, 0, func(client mqtt.Client, msg mqtt.Message) {
-					if err := a.HandleMQTTEvent(msg.Payload()); err != nil {
-						log.Printf("plugin-frigate: mqtt handle error: %v", err)
-					}
-				}); token.Wait() && token.Error() != nil {
-					log.Printf("plugin-frigate: failed to subscribe to MQTT topic %s: %v", topic, token.Error())
-				} else {
-					log.Printf("plugin-frigate: listening for real-time events on MQTT topic: %s", topic)
-				}
-			}
-		}
-	}
+	a.ctx, a.cancel = context.WithCancel(context.Background())
+	go a.reconcileCameras(a.ctx)
 
 	log.Println("plugin-frigate: started")
 	return nil, nil
+}
+
+func (a *App) closeDependencies() {
+	if a.mqttClient != nil && a.mqttClient.IsConnected() {
+		a.mqttClient.Disconnect(250)
+	}
+	if a.store != nil {
+		a.store.Close()
+	}
+	if a.msg != nil {
+		a.msg.Close()
+	}
 }
 
 func (a *App) OnShutdown() error {
@@ -436,30 +442,15 @@ func (a *App) OnShutdown() error {
 }
 
 func (a *App) loadConfig() error {
-	configJSON := os.Getenv("FRIGATE_CONFIG")
-	if configJSON != "" {
-		return json.Unmarshal([]byte(configJSON), &a.config)
-	}
-
-	if _, err := os.Stat("config.json"); err == nil {
-		data, err := os.ReadFile("config.json")
-		if err != nil {
-			return err
-		}
-		return json.Unmarshal(data, &a.config)
-	}
-
-	url := os.Getenv("FRIGATE_URL")
-	if url != "" {
-		a.config.URL = url
-		a.config.Go2RTCURL = os.Getenv("FRIGATE_GO2RTC_URL")
-		a.config.Username = os.Getenv("FRIGATE_USERNAME")
-		a.config.Password = os.Getenv("FRIGATE_PASSWORD")
-		timeout := 30000
-		if t := os.Getenv("FRIGATE_TIMEOUT_MS"); t != "" {
-			if ti, err := strconv.Atoi(t); err == nil {
-				timeout = ti
-			}
+	a.config.URL = strings.TrimSpace(os.Getenv("FRIGATE_URL"))
+	a.config.Go2RTCURL = strings.TrimSpace(os.Getenv("FRIGATE_GO2RTC_URL"))
+	a.config.Username = os.Getenv("FRIGATE_USERNAME")
+	a.config.Password = os.Getenv("FRIGATE_PASSWORD")
+	a.config.Timeout = 30000
+	if value := strings.TrimSpace(os.Getenv("FRIGATE_TIMEOUT_MS")); value != "" {
+		timeout, err := strconv.Atoi(value)
+		if err != nil || timeout <= 0 {
+			return fmt.Errorf("FRIGATE_TIMEOUT_MS must be a positive integer")
 		}
 		a.config.Timeout = timeout
 	}
@@ -473,6 +464,86 @@ func (a *App) loadConfig() error {
 	}
 
 	return nil
+}
+
+func (a *App) checkGo2RTC() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(a.config.Go2RTCURL, "/")+"/api/streams", nil)
+	if err != nil {
+		return err
+	}
+	response, err := a.client.HTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("check go2rtc: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return fmt.Errorf("check go2rtc: HTTP %d", response.StatusCode)
+	}
+	return nil
+}
+
+func (a *App) connectMQTT() error {
+	a.mqttReady = make(chan error, 1)
+	port := a.config.MQTT.Port
+	if port == "" {
+		port = "1883"
+	}
+	opts := mqtt.NewClientOptions().
+		AddBroker(fmt.Sprintf("tcp://%s:%s", a.config.MQTT.Host, port)).
+		SetClientID(PluginID + "-" + fmt.Sprintf("%d", time.Now().UnixNano())).
+		SetAutoReconnect(true).
+		SetOnConnectHandler(a.onMQTTConnect).
+		SetConnectionLostHandler(func(_ mqtt.Client, err error) { a.resourceDegraded(frigateMQTTResource, "mqtt_disconnected", err) })
+	if a.config.MQTT.User != "" {
+		opts.SetUsername(a.config.MQTT.User)
+		opts.SetPassword(a.config.MQTT.Password)
+	}
+	a.mqttClient = mqtt.NewClient(opts)
+	token := a.mqttClient.Connect()
+	if !token.WaitTimeout(10 * time.Second) {
+		return fmt.Errorf("Frigate MQTT connect timed out")
+	}
+	if token.Error() != nil {
+		return fmt.Errorf("Frigate MQTT connect: %w", token.Error())
+	}
+	select {
+	case err := <-a.mqttReady:
+		return err
+	case <-time.After(10 * time.Second):
+		return fmt.Errorf("timed out subscribing to Frigate MQTT events")
+	}
+}
+
+func (a *App) onMQTTConnect(client mqtt.Client) {
+	topic := a.config.MQTT.TopicPrefix + "/events"
+	token := client.Subscribe(topic, 0, func(_ mqtt.Client, msg mqtt.Message) {
+		if err := a.HandleMQTTEvent(msg.Payload()); err != nil {
+			log.Printf("plugin-frigate: mqtt handle error: %v", err)
+		}
+	})
+	if !token.WaitTimeout(5 * time.Second) {
+		err := fmt.Errorf("subscribe to %s timed out", topic)
+		a.resourceDegraded(frigateMQTTResource, "mqtt_subscribe_failed", err)
+		a.signalMQTT(err)
+		return
+	}
+	if err := token.Error(); err != nil {
+		a.resourceDegraded(frigateMQTTResource, "mqtt_subscribe_failed", err)
+		a.signalMQTT(err)
+		return
+	}
+	a.resourceReady(frigateMQTTResource)
+	a.signalMQTT(nil)
+	log.Printf("plugin-frigate: listening for real-time events on MQTT topic: %s", topic)
+}
+
+func (a *App) signalMQTT(err error) {
+	select {
+	case a.mqttReady <- err:
+	default:
+	}
 }
 
 func (a *App) discoverCameras() error {
@@ -497,8 +568,34 @@ func (a *App) reconcileCameras(ctx context.Context) {
 		case <-ticker.C:
 			if err := a.discoverCameras(); err != nil {
 				log.Printf("plugin-frigate: camera reconcile error: %v", err)
+				a.resourceDegraded(frigateAPIResource, "api_unavailable", err)
+			} else {
+				a.resourceReady(frigateAPIResource)
+			}
+			if a.config.Go2RTCURL != "" {
+				if err := a.checkGo2RTC(); err != nil {
+					a.resourceDegraded(go2rtcResource, "go2rtc_unavailable", err)
+				} else {
+					a.resourceReady(go2rtcResource)
+				}
 			}
 		}
+	}
+}
+
+func (a *App) resourceReady(id string) {
+	if a.reporter != nil {
+		a.reporter.Ready(id)
+	}
+}
+
+func (a *App) resourceDegraded(id, code string, err error) {
+	if a.reporter != nil {
+		message := "resource unavailable"
+		if err != nil {
+			message = err.Error()
+		}
+		a.reporter.Degraded(id, code, message, true)
 	}
 }
 

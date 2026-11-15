@@ -41,6 +41,9 @@ func TestHelloManifest(t *testing.T) {
 	if got.Setup.Mode != "selectable" || got.Setup.Category != "Cameras" {
 		t.Fatalf("Hello().Setup = %+v", got.Setup)
 	}
+	if len(got.Setup.Resources) != 3 || got.Setup.Resources[0].ID != "frigate-api" || got.Setup.Resources[1].ID != "frigate-go2rtc" || got.Setup.Resources[2].ID != "frigate-mqtt" {
+		t.Fatalf("Hello().Setup.Resources = %+v", got.Setup.Resources)
+	}
 	wantEnvironment := map[string]bool{
 		"FRIGATE_URL": true, "FRIGATE_GO2RTC_URL": true,
 		"FRIGATE_USERNAME": true, "FRIGATE_PASSWORD": true,
@@ -84,9 +87,17 @@ func TestDiscoveryCreatesCameraScopedEntitiesWithoutRoot(t *testing.T) {
 		}
 	}))
 	defer server.Close()
+	go2rtc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/streams" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer go2rtc.Close()
 
 	t.Setenv("FRIGATE_URL", server.URL)
-	t.Setenv("FRIGATE_GO2RTC_URL", "https://go2rtc.example")
+	t.Setenv("FRIGATE_GO2RTC_URL", go2rtc.URL)
 	t.Setenv("FRIGATE_EVENT_LIMIT", "20")
 
 	env := testkit.NewTestEnv(t)
@@ -124,7 +135,7 @@ func TestDiscoveryCreatesCameraScopedEntitiesWithoutRoot(t *testing.T) {
 	if !ok {
 		t.Fatalf("stream state type = %T, want domain.MediaSource", mainStream.State)
 	}
-	if streamState.URL != "https://go2rtc.example/stream.html?src=front_door" {
+	if streamState.URL != go2rtc.URL+"/stream.html?src=front_door" {
 		t.Fatalf("stream URL = %q", streamState.URL)
 	}
 	resolved, err := media.NewClient(env.Messenger()).Resolve(frigateapp.PluginID, media.ResolveRequest{Source: domain.PlayableSource{Kind: "live", Entity: mainStream.Key()}})
