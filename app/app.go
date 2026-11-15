@@ -303,6 +303,26 @@ func (a *App) Hello() contract.HelloResponse {
 		ContractVersion: contract.ContractVersion,
 		Definitions:     definitions,
 		DependsOn:       []string{"messenger", "storage", "media"},
+		Setup: &contract.SetupDefinition{
+			Mode:     contract.SetupSelectable,
+			Category: "Cameras",
+			Fields: []contract.SetupField{
+				{Key: "url", Environment: "FRIGATE_URL", Name: "Frigate URL", Description: "Base URL of the Frigate HTTP API.", Control: contract.SetupText, Format: "uri", Required: true},
+				{Key: "go2rtc_url", Environment: "FRIGATE_GO2RTC_URL", Name: "go2rtc URL", Description: "Optional base URL used to expose Frigate live streams.", Control: contract.SetupText, Format: "uri"},
+				{Key: "username", Environment: "FRIGATE_USERNAME", Name: "Username", Description: "Optional Frigate HTTP username.", Control: contract.SetupText},
+				{Key: "password", Environment: "FRIGATE_PASSWORD", Name: "Password", Description: "Optional Frigate HTTP password.", Control: contract.SetupSecret, Sensitive: true},
+				{Key: "timeout_ms", Environment: "FRIGATE_TIMEOUT_MS", Name: "HTTP timeout", Description: "Frigate request timeout in milliseconds.", Control: contract.SetupText, Format: "integer", Advanced: true, Default: json.RawMessage(`"30000"`)},
+				{Key: "mqtt_host", Environment: "FRIGATE_MQTT_HOST", Name: "MQTT host", Description: "Optional MQTT broker host for real-time Frigate events.", Control: contract.SetupText},
+				{Key: "mqtt_port", Environment: "FRIGATE_MQTT_PORT", Name: "MQTT port", Description: "MQTT broker port.", Control: contract.SetupText, Format: "integer", Advanced: true, Default: json.RawMessage(`"1883"`)},
+				{Key: "mqtt_user", Environment: "FRIGATE_MQTT_USER", Name: "MQTT username", Description: "Optional MQTT broker username.", Control: contract.SetupText},
+				{Key: "mqtt_password", Environment: "FRIGATE_MQTT_PASSWORD", Name: "MQTT password", Description: "Optional MQTT broker password.", Control: contract.SetupSecret, Sensitive: true},
+				{Key: "mqtt_topic_prefix", Environment: "FRIGATE_MQTT_TOPIC_PREFIX", Name: "MQTT topic prefix", Description: "Frigate MQTT topic prefix.", Control: contract.SetupText, Advanced: true, Default: json.RawMessage(`"frigate"`)},
+			},
+			Constraints: []contract.SetupConstraint{
+				{Kind: "all_or_none", Fields: []string{"username", "password"}},
+				{Kind: "all_or_none", Fields: []string{"mqtt_user", "mqtt_password"}},
+			},
+		},
 	}
 }
 

@@ -35,6 +35,25 @@ func TestHelloManifest(t *testing.T) {
 	if strings.Join(got.Definitions.EntityTypes, ",") != "binary_sensor,camera,event,media_source,sensor,switch" {
 		t.Fatalf("Hello().Definitions.EntityTypes = %v", got.Definitions.EntityTypes)
 	}
+	if err := got.Setup.Validate(); err != nil {
+		t.Fatalf("Hello().Setup: %v", err)
+	}
+	if got.Setup.Mode != "selectable" || got.Setup.Category != "Cameras" {
+		t.Fatalf("Hello().Setup = %+v", got.Setup)
+	}
+	wantEnvironment := map[string]bool{
+		"FRIGATE_URL": true, "FRIGATE_GO2RTC_URL": true,
+		"FRIGATE_USERNAME": true, "FRIGATE_PASSWORD": true,
+		"FRIGATE_TIMEOUT_MS": true, "FRIGATE_MQTT_HOST": true,
+		"FRIGATE_MQTT_PORT": true, "FRIGATE_MQTT_USER": true,
+		"FRIGATE_MQTT_PASSWORD": true, "FRIGATE_MQTT_TOPIC_PREFIX": true,
+	}
+	for _, field := range got.Setup.Fields {
+		delete(wantEnvironment, field.Environment)
+	}
+	if len(wantEnvironment) != 0 {
+		t.Fatalf("setup is missing environment fields: %v", wantEnvironment)
+	}
 }
 
 func TestDiscoveryCreatesCameraScopedEntitiesWithoutRoot(t *testing.T) {
