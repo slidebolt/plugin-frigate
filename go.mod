@@ -5,14 +5,14 @@ go 1.26.1
 require (
 	github.com/cucumber/godog v0.15.1
 	github.com/eclipse/paho.mqtt.golang v1.5.1
-	github.com/slidebolt/sb-contract v1.0.12
-	github.com/slidebolt/sb-domain v1.0.24
+	github.com/slidebolt/sb-contract v1.0.15
+	github.com/slidebolt/sb-domain v1.0.27
 	github.com/slidebolt/sb-media-sdk v1.0.5
 	github.com/slidebolt/sb-messenger-sdk v1.0.9
 	github.com/slidebolt/sb-runtime v1.0.9
 	github.com/slidebolt/sb-storage-sdk v1.0.8
-	github.com/slidebolt/sb-storage-server v1.0.11
-	github.com/slidebolt/sb-testkit v1.0.17
+	github.com/slidebolt/sb-storage-server v1.0.13
+	github.com/slidebolt/sb-testkit v1.0.18
 )
 
 require (
